@@ -25,7 +25,7 @@ def send_telegram(message):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
 
     try:
-        requests.post(
+        response = requests.post(
             url,
             json={
                 "chat_id": CHANNEL_ID,
@@ -33,13 +33,14 @@ def send_telegram(message):
             },
             timeout=15
         )
+
+        print("Telegram response:", response.status_code, response.text)
+
     except Exception as e:
         print("Telegram error:", e)
 
 
 def get_prediction():
-    # Abhi basic statistical placeholder.
-    # Actual game results connect hone ke baad strategy improve karenge.
     return random.choice(["BIG", "SMALL"])
 
 
@@ -83,11 +84,10 @@ def scheduler():
             now = datetime.now(ZoneInfo("Asia/Kolkata"))
             current_minute = now.strftime("%Y-%m-%d %H:%M")
 
-            # 07:00 से 23:59 तक
-            if 7 <= now.hour <= 23:
-                if current_minute != last_minute:
-                    last_minute = current_minute
-                    send_prediction()
+            # 24 घंटे, हर मिनट
+            if current_minute != last_minute:
+                last_minute = current_minute
+                send_prediction()
 
             time.sleep(5)
 
@@ -99,6 +99,12 @@ def scheduler():
 @app.route("/")
 def home():
     return "VeerGame Predictor is running!"
+
+
+@app.route("/test")
+def test():
+    send_prediction()
+    return "Test prediction sent"
 
 
 @app.route("/history")
@@ -113,6 +119,7 @@ if __name__ == "__main__":
     threading.Thread(target=scheduler, daemon=True).start()
 
     port = int(os.environ.get("PORT", 10000))
+
     app.run(
         host="0.0.0.0",
         port=port
