@@ -18,8 +18,12 @@ HISTORY = []
 
 
 def send_telegram(message):
+    print("TOKEN present:", bool(TOKEN))
+    print("CHANNEL_ID present:", bool(CHANNEL_ID))
+    print("CHANNEL_ID value:", CHANNEL_ID)
+
     if not TOKEN or not CHANNEL_ID:
-        print("BOT_TOKEN or CHANNEL_ID missing")
+        print("ERROR: BOT_TOKEN or CHANNEL_ID missing")
         return
 
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
@@ -34,34 +38,21 @@ def send_telegram(message):
             timeout=15
         )
 
-        print("Telegram response:", response.status_code, response.text)
+        print("TELEGRAM STATUS:", response.status_code)
+        print("TELEGRAM RESPONSE:", response.text)
 
     except Exception as e:
-        print("Telegram error:", e)
+        print("TELEGRAM ERROR:", repr(e))
 
 
 def get_prediction():
     return random.choice(["BIG", "SMALL"])
 
 
-def make_period(now):
-    return now.strftime("%Y%m%d%H%M")
-
-
 def send_prediction():
     now = datetime.now(ZoneInfo("Asia/Kolkata"))
-
-    period = make_period(now)
+    period = now.strftime("%Y%m%d%H%M")
     prediction = get_prediction()
-
-    HISTORY.append({
-        "period": period,
-        "prediction": prediction,
-        "time": now.strftime("%H:%M")
-    })
-
-    if len(HISTORY) > 20:
-        HISTORY.pop(0)
 
     message = (
         "🔥 VEERGAME PREDICTION 🔥\n\n"
@@ -73,7 +64,7 @@ def send_prediction():
     )
 
     send_telegram(message)
-    print(message)
+    print("PREDICTION FUNCTION FINISHED")
 
 
 def scheduler():
@@ -84,7 +75,6 @@ def scheduler():
             now = datetime.now(ZoneInfo("Asia/Kolkata"))
             current_minute = now.strftime("%Y-%m-%d %H:%M")
 
-            # 24 घंटे, हर मिनट
             if current_minute != last_minute:
                 last_minute = current_minute
                 send_prediction()
@@ -92,7 +82,7 @@ def scheduler():
             time.sleep(5)
 
         except Exception as e:
-            print("Scheduler error:", e)
+            print("SCHEDULER ERROR:", repr(e))
             time.sleep(10)
 
 
@@ -116,11 +106,12 @@ def history():
 
 
 if __name__ == "__main__":
+    print("APP STARTING")
+    print("TOKEN present:", bool(TOKEN))
+    print("CHANNEL_ID present:", bool(CHANNEL_ID))
+    print("CHANNEL_ID:", CHANNEL_ID)
+
     threading.Thread(target=scheduler, daemon=True).start()
 
     port = int(os.environ.get("PORT", 10000))
-
-    app.run(
-        host="0.0.0.0",
-        port=port
-    )
+    app.run(host="0.0.0.0", port=port)
