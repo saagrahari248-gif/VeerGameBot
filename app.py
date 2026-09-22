@@ -26,7 +26,7 @@ CURRENT_URL = (
 POLL_SECONDS = 5
 
 # =========================
-# BOT STATE
+# STATE
 # =========================
 
 owner_chat_id = None
@@ -43,11 +43,13 @@ losses = 0
 
 history_cache = []
 
+
 # =========================
-# TELEGRAM
+# TELEGRAM API
 # =========================
 
 def telegram_api(method, data):
+
     if not BOT_TOKEN:
         print("ERROR: BOT_TOKEN missing")
         return None
@@ -61,16 +63,29 @@ def telegram_api(method, data):
             timeout=15
         )
 
-        print("TELEGRAM:", method, response.status_code)
+        result = response.json()
 
-        return response.json()
+        print(
+            "TELEGRAM:",
+            method,
+            response.status_code,
+            result.get("ok")
+        )
+
+        return result
 
     except Exception as e:
-        print("TELEGRAM ERROR:", repr(e))
+
+        print(
+            "TELEGRAM ERROR:",
+            repr(e)
+        )
+
         return None
 
 
 def send_message(chat_id, text):
+
     return telegram_api(
         "sendMessage",
         {
@@ -81,6 +96,7 @@ def send_message(chat_id, text):
 
 
 def edit_message(chat_id, message_id, text):
+
     return telegram_api(
         "editMessageText",
         {
@@ -92,93 +108,198 @@ def edit_message(chat_id, message_id, text):
 
 
 # =========================
-# GAME HISTORY
+# GET GAME HISTORY
 # =========================
 
 def get_history():
+
     try:
+
         response = requests.get(
             HISTORY_URL,
             params={
+                "pageNo": 1,
+                "pageSize": 500,
                 "ts": int(time.time() * 1000)
             },
+            headers={
+                "User-Agent": "Mozilla/5.0"
+            },
             timeout=15
+        )
+
+        print(
+            "HISTORY API:",
+            response.status_code
         )
 
         data = response.json()
 
         if data.get("code") != 0:
-            print("HISTORY ERROR:", data)
+
+            print(
+                "HISTORY API ERROR:",
+                data
+            )
+
             return []
 
-        rows = data.get("data", {}).get("list", [])
+        rows = (
+            data
+            .get("data", {})
+            .get("list", [])
+        )
+
+        print(
+            "HISTORY COUNT:",
+            len(rows)
+        )
 
         result = []
 
         for row in rows:
-            issue = str(row.get("issueNumber", ""))
-            number_text = str(row.get("number", ""))
+
+            issue = str(
+                row.get(
+                    "issueNumber",
+                    ""
+                )
+            )
+
+            number_text = str(
+                row.get(
+                    "number",
+                    ""
+                )
+            )
 
             if not issue or number_text == "":
                 continue
 
             try:
-                number = int(number_text)
+
+                number = int(
+                    number_text
+                )
+
             except:
+
                 continue
 
-            size = "BIG" if number >= 5 else "SMALL"
+            size = (
+                "BIG"
+                if number >= 5
+                else "SMALL"
+            )
 
             result.append(
                 {
                     "issue": issue,
                     "number": number,
                     "size": size,
-                    "color": row.get("color", "")
+                    "color": row.get(
+                        "color",
+                        ""
+                    )
                 }
             )
+
+        print(
+            "VALID HISTORY:",
+            len(result)
+        )
 
         return result
 
     except Exception as e:
-        print("HISTORY REQUEST ERROR:", repr(e))
+
+        print(
+            "HISTORY REQUEST ERROR:",
+            repr(e)
+        )
+
         return []
 
 
 # =========================
-# CURRENT / NEXT PERIOD
+# GET CURRENT PERIOD
 # =========================
 
 def get_periods():
+
     try:
+
         response = requests.get(
             CURRENT_URL,
             params={
                 "ts": int(time.time() * 1000)
             },
+            headers={
+                "User-Agent": "Mozilla/5.0"
+            },
             timeout=15
+        )
+
+        print(
+            "PERIOD API:",
+            response.status_code
         )
 
         data = response.json()
 
-        previous = data.get("previous", {})
-        current = data.get("current", {})
-        next_data = data.get("next", {})
+        previous = data.get(
+            "previous",
+            {}
+        )
 
-        return {
+        current = data.get(
+            "current",
+            {}
+        )
+
+        next_data = data.get(
+            "next",
+            {}
+        )
+
+        result = {
+
             "previous": str(
-                previous.get("issueNumber", "")
+                previous.get(
+                    "issueNumber",
+                    ""
+                )
             ),
+
             "current": str(
-                current.get("issueNumber", "")
+                current.get(
+                    "issueNumber",
+                    ""
+                )
             ),
+
             "next": str(
-                next_data.get("issueNumber", "")
+                next_data.get(
+                    "issueNumber",
+                    ""
+                )
             )
         }
 
+        print(
+            "PERIODS:",
+            result
+        )
+
+        return result
+
     except Exception as e:
-        print("PERIOD REQUEST ERROR:", repr(e))
+
+        print(
+            "PERIOD REQUEST ERROR:",
+            repr(e)
+        )
+
         return {
             "previous": "",
             "current": "",
@@ -187,25 +308,25 @@ def get_periods():
 
 
 # =========================
-# STRATEGY
+# PREDICTION STRATEGY
 # =========================
 
 def make_prediction(history):
-    """
-    Last 15 results ko use karta hai.
-
-    BIG  = 5-9
-    SMALL = 0-4
-
-    Recent pattern ke historical continuations ko dekhta hai.
-    Sabse lamba matching pattern pehle check hota hai.
-    """
 
     if len(history) < 15:
-        return None, "15 results nahi mile"
+
+        print(
+            "WAIT: History less than 15:",
+            len(history)
+        )
+
+        return None, (
+            "15 results required"
+        )
 
     # API newest -> oldest
-    # strategy ke liye oldest -> newest
+    # Strategy oldest -> newest
+
     sequence = [
         item["size"]
         for item in reversed(history)
@@ -213,10 +334,22 @@ def make_prediction(history):
 
     recent_15 = sequence[-15:]
 
-    # 7 se 1 result tak pattern check
-    for pattern_length in range(7, 0, -1):
+    print(
+        "LAST 15:",
+        " ".join(recent_15)
+    )
 
-        target = recent_15[-pattern_length:]
+    # Pattern length 7 -> 1
+
+    for pattern_length in range(
+        7,
+        0,
+        -1
+    ):
+
+        target = recent_15[
+            -pattern_length:
+        ]
 
         continuations = []
 
@@ -231,33 +364,58 @@ def make_prediction(history):
 
             if old_pattern == target:
 
-                next_index = i + pattern_length
+                next_index = (
+                    i + pattern_length
+                )
 
                 if next_index < len(sequence):
+
                     continuations.append(
                         sequence[next_index]
                     )
 
-        if continuations:
+        if not continuations:
+            continue
 
-            big = continuations.count("BIG")
-            small = continuations.count("SMALL")
+        big_count = (
+            continuations.count("BIG")
+        )
 
-            if big > small:
-                return (
-                    "BIG",
-                    f"Pattern {pattern_length}: "
-                    f"BIG {big}, SMALL {small}"
-                )
+        small_count = (
+            continuations.count("SMALL")
+        )
 
-            if small > big:
-                return (
-                    "SMALL",
-                    f"Pattern {pattern_length}: "
-                    f"BIG {big}, SMALL {small}"
-                )
+        print(
+            "PATTERN:",
+            pattern_length,
+            "BIG:",
+            big_count,
+            "SMALL:",
+            small_count
+        )
 
-    return None, "Strong historical continuation nahi mila"
+        if big_count > small_count:
+
+            return (
+                "BIG",
+                f"Pattern {pattern_length}: "
+                f"BIG {big_count}, "
+                f"SMALL {small_count}"
+            )
+
+        if small_count > big_count:
+
+            return (
+                "SMALL",
+                f"Pattern {pattern_length}: "
+                f"BIG {big_count}, "
+                f"SMALL {small_count}"
+            )
+
+    return (
+        None,
+        "No strong historical continuation"
+    )
 
 
 # =========================
@@ -265,6 +423,7 @@ def make_prediction(history):
 # =========================
 
 def prediction_text(issue, pred):
+
     return (
         "🎯 VEER GAME PREDICTION\n"
         "━━━━━━━━━━━━━━━━━━\n"
@@ -283,6 +442,7 @@ def result_text(
     pred,
     status
 ):
+
     return (
         "🎯 VEER GAME RESULT\n"
         "━━━━━━━━━━━━━━━━━━\n"
@@ -292,11 +452,14 @@ def result_text(
         f"Prediction: {pred}\n"
         f"Result: {status}\n"
         f"Level: {level}/7\n"
+        f"Wins: {wins}\n"
+        f"Losses: {losses}\n"
         "━━━━━━━━━━━━━━━━━━"
     )
 
 
 def post_channel(text):
+
     global prediction_message_id
 
     result = send_message(
@@ -305,18 +468,39 @@ def post_channel(text):
     )
 
     if result and result.get("ok"):
+
         try:
+
             prediction_message_id = (
                 result["result"]["message_id"]
             )
-        except:
-            pass
+
+            print(
+                "CHANNEL MESSAGE SENT:",
+                prediction_message_id
+            )
+
+        except Exception as e:
+
+            print(
+                "MESSAGE ID ERROR:",
+                repr(e)
+            )
+
+    else:
+
+        print(
+            "CHANNEL SEND FAILED:",
+            result
+        )
 
 
 def update_channel(text):
+
     global prediction_message_id
 
     if not prediction_message_id:
+
         post_channel(text)
         return
 
@@ -327,11 +511,16 @@ def update_channel(text):
     )
 
     if not result or not result.get("ok"):
+
+        print(
+            "EDIT FAILED, SENDING NEW MESSAGE"
+        )
+
         post_channel(text)
 
 
 # =========================
-# GAME LOOP
+# GAME PROCESS
 # =========================
 
 def process_game():
@@ -344,17 +533,28 @@ def process_game():
     global level
     global wins
     global losses
-    global prediction_message_id
 
     history = get_history()
 
     if not history:
-        print("No history received")
+
+        print(
+            "NO HISTORY RECEIVED"
+        )
+
         return
 
     periods = get_periods()
 
     next_period = periods["next"]
+
+    if not next_period:
+
+        print(
+            "NEXT PERIOD NOT FOUND"
+        )
+
+        return
 
     latest = history[0]
 
@@ -370,46 +570,50 @@ def process_game():
 
     if last_completed_issue is None:
 
-        last_completed_issue = completed_issue
-
-        print(
-            "STARTED FROM:",
+        last_completed_issue = (
             completed_issue
         )
 
-        if next_period:
+        print(
+            "STARTED FROM:",
+            completed_issue,
+            completed_number,
+            completed_size
+        )
 
-            pred, reason = make_prediction(
-                history
+        pred, reason = make_prediction(
+            history
+        )
+
+        print(
+            "FIRST PREDICTION:",
+            pred,
+            reason
+        )
+
+        if pred:
+
+            prediction = {
+                "issue": next_period,
+                "prediction": pred,
+                "reason": reason
+            }
+
+            last_prediction_issue = (
+                next_period
             )
 
-            if pred:
-
-                prediction = {
-                    "issue": next_period,
-                    "prediction": pred,
-                    "reason": reason
-                }
-
-                last_prediction_issue = next_period
-
-                post_channel(
-                    prediction_text(
-                        next_period,
-                        pred
-                    )
-                )
-
-                print(
-                    "PREDICTION:",
+            post_channel(
+                prediction_text(
                     next_period,
                     pred
                 )
+            )
 
         return
 
     # =========================
-    # NEW RESULT
+    # NEW COMPLETED RESULT
     # =========================
 
     if completed_issue != last_completed_issue:
@@ -422,13 +626,18 @@ def process_game():
         )
 
         # Check previous prediction
+
         if prediction:
 
-            predicted_issue = prediction["issue"]
+            predicted_issue = (
+                prediction["issue"]
+            )
 
             if predicted_issue == completed_issue:
 
-                pred = prediction["prediction"]
+                pred = prediction[
+                    "prediction"
+                ]
 
                 if pred == completed_size:
 
@@ -436,7 +645,7 @@ def process_game():
 
                     wins += 1
 
-                    # WIN = reset to level 1
+                    # WIN -> reset level
                     level = 1
 
                 else:
@@ -445,9 +654,20 @@ def process_game():
 
                     losses += 1
 
-                    # Non-money simulation level
+                    # Simulation level
                     if level < 7:
                         level += 1
+
+                print(
+                    "RESULT:",
+                    status,
+                    "LEVEL:",
+                    level,
+                    "WINS:",
+                    wins,
+                    "LOSSES:",
+                    losses
+                )
 
                 update_channel(
                     result_text(
@@ -459,13 +679,10 @@ def process_game():
                     )
                 )
 
-                print(
-                    status,
-                    "LEVEL:",
-                    level
-                )
+        last_completed_issue = (
+            completed_issue
+        )
 
-        last_completed_issue = completed_issue
         prediction = None
 
     # =========================
@@ -480,6 +697,13 @@ def process_game():
                 history
             )
 
+            print(
+                "NEXT PREDICTION:",
+                next_period,
+                pred,
+                reason
+            )
+
             if pred:
 
                 prediction = {
@@ -488,19 +712,15 @@ def process_game():
                     "reason": reason
                 }
 
-                last_prediction_issue = next_period
+                last_prediction_issue = (
+                    next_period
+                )
 
                 update_channel(
                     prediction_text(
                         next_period,
                         pred
                     )
-                )
-
-                print(
-                    "NEXT:",
-                    next_period,
-                    pred
                 )
 
             else:
@@ -512,26 +732,36 @@ def process_game():
                 )
 
 
+# =========================
+# GAME LOOP
+# =========================
+
 def game_loop():
 
-    print("GAME LOOP STARTED")
+    print(
+        "GAME LOOP STARTED"
+    )
 
     while True:
 
         try:
+
             process_game()
 
         except Exception as e:
+
             print(
                 "GAME LOOP ERROR:",
                 repr(e)
             )
 
-        time.sleep(POLL_SECONDS)
+        time.sleep(
+            POLL_SECONDS
+        )
 
 
 # =========================
-# TELEGRAM OWNER LISTENER
+# TELEGRAM LISTENER
 # =========================
 
 def bot_listener():
@@ -540,7 +770,9 @@ def bot_listener():
 
     offset = 0
 
-    print("BOT LISTENER STARTED")
+    print(
+        "BOT LISTENER STARTED"
+    )
 
     while True:
 
@@ -563,10 +795,12 @@ def bot_listener():
             data = response.json()
 
             if not data.get("ok"):
+
                 print(
                     "UPDATE ERROR:",
                     data
                 )
+
                 time.sleep(5)
                 continue
 
@@ -575,7 +809,9 @@ def bot_listener():
                 []
             ):
 
-                offset = update["update_id"]
+                offset = update[
+                    "update_id"
+                ]
 
                 message = update.get(
                     "message"
@@ -584,19 +820,26 @@ def bot_listener():
                 if not message:
                     continue
 
-                chat_id = message["chat"]["id"]
+                chat_id = message[
+                    "chat"
+                ]["id"]
 
                 text = message.get(
                     "text",
                     ""
                 ).strip()
 
-                # First /start becomes owner
+                # First /start = owner
+
                 if owner_chat_id is None:
 
-                    if text.startswith("/start"):
+                    if text.startswith(
+                        "/start"
+                    ):
 
-                        owner_chat_id = chat_id
+                        owner_chat_id = (
+                            chat_id
+                        )
 
                         send_message(
                             chat_id,
@@ -611,11 +854,14 @@ def bot_listener():
 
                     continue
 
-                # Ignore everyone except owner
+                # Ignore other users
+
                 if chat_id != owner_chat_id:
                     continue
 
-                if text.startswith("/start"):
+                if text.startswith(
+                    "/start"
+                ):
 
                     send_message(
                         chat_id,
@@ -625,7 +871,9 @@ def bot_listener():
                         f"Losses: {losses}"
                     )
 
-                elif text.startswith("/status"):
+                elif text.startswith(
+                    "/status"
+                ):
 
                     send_message(
                         chat_id,
@@ -637,7 +885,9 @@ def bot_listener():
                         f"Prediction: {prediction}"
                     )
 
-                elif text.startswith("/history"):
+                elif text.startswith(
+                    "/history"
+                ):
 
                     lines = []
 
@@ -664,7 +914,9 @@ def bot_listener():
                             "History available nahi hai."
                         )
 
-                elif text.startswith("/reset"):
+                elif text.startswith(
+                    "/reset"
+                ):
 
                     level = 1
                     wins = 0
@@ -692,7 +944,10 @@ def bot_listener():
 
 @app.route("/")
 def home():
-    return "VeerGame Predictor is running!"
+
+    return (
+        "VeerGame Predictor is running!"
+    )
 
 
 @app.route("/test")
@@ -704,7 +959,11 @@ def test():
         "channel": CHANNEL_ID,
         "level": level,
         "wins": wins,
-        "losses": losses
+        "losses": losses,
+        "history_count": len(
+            history_cache
+        ),
+        "prediction": prediction
     }
 
 
@@ -714,9 +973,17 @@ def test():
 
 if __name__ == "__main__":
 
-    print("================================")
-    print("VEERGAME PREDICTOR STARTING")
-    print("================================")
+    print(
+        "================================"
+    )
+
+    print(
+        "VEERGAME PREDICTOR STARTING"
+    )
+
+    print(
+        "================================"
+    )
 
     print(
         "TOKEN PRESENT:",
@@ -748,4 +1015,4 @@ if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
         port=port
-    )
+        )
