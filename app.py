@@ -3,7 +3,6 @@ import time
 import threading
 import requests
 import json
-
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
@@ -64,7 +63,7 @@ def telegram_send(text):
             timeout=15
         )
 
-        print("TELEGRAM:", r.status_code)
+        print("TELEGRAM:", r.status_code, r.text[:300])
         return r.ok
 
     except Exception as e:
@@ -73,7 +72,7 @@ def telegram_send(text):
 
 
 # =========================
-# PREDICTION
+# PREDICTION ENGINE
 # =========================
 
 def make_prediction(rows):
@@ -81,23 +80,30 @@ def make_prediction(rows):
     if len(rows) < 15:
         return None
 
-    newest = []
+    results = []
 
+    # API newest -> oldest
     for row in rows[:15]:
         value = big_small(row.get("number"))
 
         if value:
-            newest.append(value)
+            results.append(value)
 
-    if len(newest) < 15:
+    if len(results) < 15:
         return None
 
-    sequence = list(reversed(newest))
+    # oldest -> newest
+    sequence = list(reversed(results))
+
+    print("15 SEQUENCE:", sequence)
+
+    # ---------------------------------
+    # 1. Pattern matching
+    # ---------------------------------
 
     for pattern_length in range(7, 0, -1):
 
         target = sequence[-pattern_length:]
-
         followers = []
 
         for i in range(len(sequence) - pattern_length):
@@ -114,11 +120,63 @@ def make_prediction(rows):
             big_count = followers.count("BIG")
             small_count = followers.count("SMALL")
 
+            print(
+                "PATTERN:",
+                target,
+                "FOLLOWERS:",
+                followers
+            )
+
             if big_count > small_count:
                 return "BIG"
 
             if small_count > big_count:
                 return "SMALL"
+
+    # ---------------------------------
+    # 2. Recent 5-result fallback
+    # ---------------------------------
+
+    recent5 = sequence[-5:]
+
+    big5 = recent5.count("BIG")
+    small5 = recent5.count("SMALL")
+
+    print(
+        "RECENT 5:",
+        recent5,
+        "BIG:",
+        big5,
+        "SMALL:",
+        small5
+    )
+
+    if big5 > small5:
+        return "SMALL"
+
+    if small5 > big5:
+        return "BIG"
+
+    # ---------------------------------
+    # 3. Last 15 frequency fallback
+    # ---------------------------------
+
+    big15 = sequence.count("BIG")
+    small15 = sequence.count("SMALL")
+
+    print(
+        "15 COUNT:",
+        "BIG:",
+        big15,
+        "SMALL:",
+        small15
+    )
+
+    if big15 > small15:
+        return "SMALL"
+
+    if small15 > big15:
+        return "BIG"
 
     return None
 
@@ -161,7 +219,10 @@ def process_prediction(rows):
         actual
     )
 
+    # ---------------------------------
     # Check previous prediction
+    # ---------------------------------
+
     if current_prediction:
 
         if current_prediction == actual:
@@ -175,7 +236,7 @@ def process_prediction(rows):
                 f"Prediction: {current_prediction}\n"
                 f"Result: {actual}\n\n"
                 f"WIN: {wins} | LOSS: {losses}\n"
-                f"Level: {level}"
+                f"Analysis Level: {level}"
             )
 
         else:
@@ -191,18 +252,21 @@ def process_prediction(rows):
                 f"Prediction: {current_prediction}\n"
                 f"Result: {actual}\n\n"
                 f"WIN: {wins} | LOSS: {losses}\n"
-                f"Next Level: {level}"
+                f"Analysis Level: {level}"
             )
 
+    # ---------------------------------
     # New prediction
+    # ---------------------------------
+
     prediction = make_prediction(rows)
 
-    if prediction:
+    try:
+        next_issue = str(int(issue) + 1)
+    except Exception:
+        next_issue = "NEXT"
 
-        try:
-            next_issue = str(int(issue) + 1)
-        except Exception:
-            next_issue = "NEXT"
+    if prediction:
 
         current_prediction = prediction
         current_prediction_issue = next_issue
@@ -210,10 +274,10 @@ def process_prediction(rows):
         telegram_send(
             "🎯 VEERGAME ANALYSIS\n\n"
             f"Next Period: {next_issue}\n"
-            f"Prediction: {prediction}\n"
+            f"Signal: {prediction}\n"
             f"Analysis Level: {level}\n\n"
             f"WIN: {wins} | LOSS: {losses}\n"
-            "Mode: Simulation"
+            "Mode: Statistical Simulation"
         )
 
         print(
@@ -229,8 +293,8 @@ def process_prediction(rows):
 
         telegram_send(
             "⏳ VEERGAME ANALYSIS\n\n"
-            "Next Period: WAIT\n"
-            "No sufficiently supported historical pattern."
+            "Signal: WAIT\n"
+            "No clear statistical signal."
         )
 
 
@@ -244,11 +308,10 @@ def push_history():
     global history
     global last_history_update
 
-    # Read simple form request.
-    # This avoids browser CORS preflight.
     key = request.form.get("key")
 
     if key != BRIDGE_KEY:
+
         return jsonify({
             "ok": False,
             "error": "Invalid bridge key"
@@ -257,6 +320,7 @@ def push_history():
     payload = request.form.get("payload")
 
     if not payload:
+
         return jsonify({
             "ok": False,
             "error": "No payload"
@@ -264,7 +328,9 @@ def push_history():
 
     try:
         data = json.loads(payload)
+
     except Exception as e:
+
         return jsonify({
             "ok": False,
             "error": "Invalid JSON",
@@ -274,12 +340,14 @@ def push_history():
     rows = data.get("list", [])
 
     if not isinstance(rows, list):
+
         return jsonify({
             "ok": False,
             "error": "Invalid history"
         }), 400
 
     history = rows
+
     last_history_update = data.get(
         "timestamp",
         int(time.time() * 1000)
@@ -292,7 +360,9 @@ def push_history():
 
     try:
         process_prediction(history)
+
     except Exception as e:
+
         print(
             "PROCESS ERROR:",
             repr(e)
@@ -365,6 +435,7 @@ def telegram_listener():
             data = r.json()
 
             if not data.get("ok"):
+
                 time.sleep(2)
                 continue
 
@@ -389,12 +460,11 @@ def telegram_listener():
                         f"{TELEGRAM_API}/sendMessage",
                         json={
                             "chat_id": chat_id,
-                            "text": (
+                            "text":
                                 "✅ VeerGame Predictor connected.\n\n"
                                 "/status\n"
                                 "/history\n"
                                 "/reset"
-                            )
                         },
                         timeout=15
                     )
@@ -405,7 +475,7 @@ def telegram_listener():
                         f"{TELEGRAM_API}/sendMessage",
                         json={
                             "chat_id": chat_id,
-                            "text": (
+                            "text":
                                 "📊 STATUS\n\n"
                                 f"Prediction: {current_prediction}\n"
                                 f"Period: {current_prediction_issue}\n"
@@ -413,7 +483,6 @@ def telegram_listener():
                                 f"LOSS: {losses}\n"
                                 f"Level: {level}\n"
                                 f"History: {len(history)}"
-                            )
                         },
                         timeout=15
                     )
@@ -436,10 +505,9 @@ def telegram_listener():
                         f"{TELEGRAM_API}/sendMessage",
                         json={
                             "chat_id": chat_id,
-                            "text": (
+                            "text":
                                 "📜 LAST 15 RESULTS\n\n"
                                 + "\n".join(lines)
-                            )
                         },
                         timeout=15
                     )
@@ -524,4 +592,4 @@ if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
         port=port
-    )
+        )
