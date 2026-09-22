@@ -411,12 +411,21 @@ def fetch_game_history():
             GAME_API,
             params={"pageNo": 1, "pageSize": 50},
             headers={
-                "User-Agent": "Mozilla/5.0",
-                "Accept": "application/json",
-                "Referer": "https://www.veergame6.com/"
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Referer": "https://www.veergame6.com/",
+                "Origin": "https://www.veergame6.com",
+                "Connection": "keep-alive",
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "cross-site"
             },
             timeout=20
         )
+
+        print("API STATUS:", response.status_code, flush=True)
+        print("API RAW (first 200):", response.text[:200], flush=True)
 
         data = response.json()
 
