@@ -6,19 +6,12 @@ from flask import Flask
 
 app = Flask(__name__)
 
-# =========================================================
+# =========================
 # SETTINGS
-# =========================================================
+# =========================
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "@VeerGameBot369")
-
-# Optional:
-# Telegram owner ka numeric chat ID yahan environment variable me rakho.
-# Agar empty hai to bot commands sabse pehle /start karne wale chat ko
-# owner maan lega.
-OWNER_CHAT_ID = os.environ.get("OWNER_CHAT_ID", "")
 
 HISTORY_URL = (
     "https://draw.ar-lottery01.com/"
@@ -32,11 +25,11 @@ CURRENT_URL = (
 
 POLL_SECONDS = 5
 
-# =========================================================
-# MEMORY
-# =========================================================
+# =========================
+# BOT STATE
+# =========================
 
-owner_chat_id = int(OWNER_CHAT_ID) if OWNER_CHAT_ID.isdigit() else None
+owner_chat_id = None
 
 last_completed_issue = None
 last_prediction_issue = None
@@ -44,49 +37,41 @@ last_prediction_issue = None
 prediction = None
 prediction_message_id = None
 
-simulation_level = 1
-win_count = 0
-loss_count = 0
-
-box_win_count = 0
+level = 1
+wins = 0
+losses = 0
 
 history_cache = []
 
-lock = threading.Lock()
-
-
-# =========================================================
+# =========================
 # TELEGRAM
-# =========================================================
+# =========================
 
-def telegram_request(method, payload):
+def telegram_api(method, data):
     if not BOT_TOKEN:
-        print("BOT_TOKEN missing")
+        print("ERROR: BOT_TOKEN missing")
         return None
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
 
     try:
-        r = requests.post(
+        response = requests.post(
             url,
-            json=payload,
+            json=data,
             timeout=15
         )
 
-        print("TELEGRAM:", method, r.status_code)
+        print("TELEGRAM:", method, response.status_code)
 
-        if not r.ok:
-            print(r.text)
-
-        return r.json()
+        return response.json()
 
     except Exception as e:
         print("TELEGRAM ERROR:", repr(e))
         return None
 
 
-def telegram_send(chat_id, text):
-    return telegram_request(
+def send_message(chat_id, text):
+    return telegram_api(
         "sendMessage",
         {
             "chat_id": chat_id,
@@ -95,8 +80,8 @@ def telegram_send(chat_id, text):
     )
 
 
-def telegram_edit(chat_id, message_id, text):
-    return telegram_request(
+def edit_message(chat_id, message_id, text):
+    return telegram_api(
         "editMessageText",
         {
             "chat_id": chat_id,
@@ -106,13 +91,13 @@ def telegram_edit(chat_id, message_id, text):
     )
 
 
-# =========================================================
-# GAME API
-# =========================================================
+# =========================
+# GAME HISTORY
+# =========================
 
 def get_history():
     try:
-        r = requests.get(
+        response = requests.get(
             HISTORY_URL,
             params={
                 "ts": int(time.time() * 1000)
@@ -120,10 +105,10 @@ def get_history():
             timeout=15
         )
 
-        data = r.json()
+        data = response.json()
 
         if data.get("code") != 0:
-            print("HISTORY API ERROR:", data)
+            print("HISTORY ERROR:", data)
             return []
 
         rows = data.get("data", {}).get("list", [])
@@ -131,7 +116,6 @@ def get_history():
         result = []
 
         for row in rows:
-
             issue = str(row.get("issueNumber", ""))
             number_text = str(row.get("number", ""))
 
@@ -143,8 +127,6 @@ def get_history():
             except:
                 continue
 
-            # 0-4 SMALL
-            # 5-9 BIG
             size = "BIG" if number >= 5 else "SMALL"
 
             result.append(
@@ -159,13 +141,17 @@ def get_history():
         return result
 
     except Exception as e:
-        print("HISTORY ERROR:", repr(e))
+        print("HISTORY REQUEST ERROR:", repr(e))
         return []
 
 
-def get_current_period():
+# =========================
+# CURRENT / NEXT PERIOD
+# =========================
+
+def get_periods():
     try:
-        r = requests.get(
+        response = requests.get(
             CURRENT_URL,
             params={
                 "ts": int(time.time() * 1000)
@@ -173,20 +159,26 @@ def get_current_period():
             timeout=15
         )
 
-        data = r.json()
+        data = response.json()
 
-        current = data.get("current", {})
-        next_period = data.get("next", {})
         previous = data.get("previous", {})
+        current = data.get("current", {})
+        next_data = data.get("next", {})
 
         return {
-            "previous": str(previous.get("issueNumber", "")),
-            "current": str(current.get("issueNumber", "")),
-            "next": str(next_period.get("issueNumber", ""))
+            "previous": str(
+                previous.get("issueNumber", "")
+            ),
+            "current": str(
+                current.get("issueNumber", "")
+            ),
+            "next": str(
+                next_data.get("issueNumber", "")
+            )
         }
 
     except Exception as e:
-        print("CURRENT API ERROR:", repr(e))
+        print("PERIOD REQUEST ERROR:", repr(e))
         return {
             "previous": "",
             "current": "",
@@ -194,63 +186,50 @@ def get_current_period():
         }
 
 
-# =========================================================
+# =========================
 # STRATEGY
-# =========================================================
+# =========================
 
-def build_sequence(history):
+def make_prediction(history):
     """
-    API latest -> oldest hota hai.
-    Hum oldest -> newest sequence banate hain.
-    """
+    Last 15 results ko use karta hai.
 
-    ordered = list(reversed(history))
+    BIG  = 5-9
+    SMALL = 0-4
 
-    return [
-        item["size"]
-        for item in ordered
-    ]
-
-
-def pattern_prediction(history):
-    """
-    Last 15 completed results use karta hai.
-
-    Strategy:
-    - Last 15 BIG/SMALL dekho.
-    - Recent suffix ke same patterns history me search karo.
-    - Pattern ke baad historically BIG/SMALL kya aaya,
-      uska majority continuation lo.
-    - Pattern na mile to WAIT.
-
-    Yeh statistical simulation hai, guaranteed prediction nahi.
+    Recent pattern ke historical continuations ko dekhta hai.
+    Sabse lamba matching pattern pehle check hota hai.
     """
 
     if len(history) < 15:
-        return None, "15 results available nahi hain"
+        return None, "15 results nahi mile"
 
-    sequence = build_sequence(history)
+    # API newest -> oldest
+    # strategy ke liye oldest -> newest
+    sequence = [
+        item["size"]
+        for item in reversed(history)
+    ]
 
-    recent = sequence[-15:]
+    recent_15 = sequence[-15:]
 
-    # Longer pattern ko priority
+    # 7 se 1 result tak pattern check
     for pattern_length in range(7, 0, -1):
 
-        if len(sequence) <= pattern_length:
-            continue
-
-        target = recent[-pattern_length:]
+        target = recent_15[-pattern_length:]
 
         continuations = []
 
-        # Historical sequence me matching pattern dhundo.
-        # Current last pattern ko exclude karne ke liye
-        # sirf older positions check kar rahe hain.
-        for i in range(0, len(sequence) - pattern_length):
+        for i in range(
+            0,
+            len(sequence) - pattern_length
+        ):
 
-            pattern = sequence[i:i + pattern_length]
+            old_pattern = sequence[
+                i:i + pattern_length
+            ]
 
-            if pattern == target:
+            if old_pattern == target:
 
                 next_index = i + pattern_length
 
@@ -261,37 +240,31 @@ def pattern_prediction(history):
 
         if continuations:
 
-            big_count = continuations.count("BIG")
-            small_count = continuations.count("SMALL")
+            big = continuations.count("BIG")
+            small = continuations.count("SMALL")
 
-            if big_count > small_count:
+            if big > small:
                 return (
                     "BIG",
-                    f"Pattern length {pattern_length}, "
-                    f"historical BIG {big_count} / SMALL {small_count}"
+                    f"Pattern {pattern_length}: "
+                    f"BIG {big}, SMALL {small}"
                 )
 
-            if small_count > big_count:
+            if small > big:
                 return (
                     "SMALL",
-                    f"Pattern length {pattern_length}, "
-                    f"historical BIG {big_count} / SMALL {small_count}"
+                    f"Pattern {pattern_length}: "
+                    f"BIG {big}, SMALL {small}"
                 )
 
-    # No strong continuation
-    return None, "Matching historical continuation nahi mila"
+    return None, "Strong historical continuation nahi mila"
 
 
-# =========================================================
-# MESSAGE FORMAT
-# =========================================================
+# =========================
+# CHANNEL MESSAGE
+# =========================
 
-def make_prediction_message(
-    issue,
-    pred,
-    reason,
-    level
-):
+def prediction_text(issue, pred):
     return (
         "🎯 VEER GAME PREDICTION\n"
         "━━━━━━━━━━━━━━━━━━\n"
@@ -299,19 +272,16 @@ def make_prediction_message(
         f"Prediction: {pred}\n"
         f"Level: {level}/7\n"
         "━━━━━━━━━━━━━━━━━━\n"
-        "Status: WAITING FOR RESULT\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "Pattern analysis only — no guaranteed result."
+        "⏳ Result ka wait..."
     )
 
 
-def make_result_message(
+def result_text(
     issue,
     number,
     actual,
     pred,
-    status,
-    level
+    status
 ):
     return (
         "🎯 VEER GAME RESULT\n"
@@ -321,81 +291,70 @@ def make_result_message(
         f"Actual: {actual}\n"
         f"Prediction: {pred}\n"
         f"Result: {status}\n"
-        f"Simulation Level: {level}/7\n"
+        f"Level: {level}/7\n"
         "━━━━━━━━━━━━━━━━━━"
     )
 
 
-# =========================================================
-# CHANNEL POSTING
-# =========================================================
-
-def send_new_channel_message(text):
+def post_channel(text):
     global prediction_message_id
 
-    result = telegram_send(
+    result = send_message(
         CHANNEL_ID,
         text
     )
 
-    try:
-        if result and result.get("ok"):
+    if result and result.get("ok"):
+        try:
             prediction_message_id = (
                 result["result"]["message_id"]
             )
-    except:
-        pass
+        except:
+            pass
 
 
-def edit_channel_message(text):
+def update_channel(text):
     global prediction_message_id
 
     if not prediction_message_id:
-        send_new_channel_message(text)
+        post_channel(text)
         return
 
-    result = telegram_edit(
+    result = edit_message(
         CHANNEL_ID,
         prediction_message_id,
         text
     )
 
     if not result or not result.get("ok"):
-        send_new_channel_message(text)
+        post_channel(text)
 
 
-# =========================================================
-# GAME PROCESSING
-# =========================================================
+# =========================
+# GAME LOOP
+# =========================
 
-def process_new_game_state():
+def process_game():
+
     global history_cache
     global last_completed_issue
     global last_prediction_issue
     global prediction
 
-    global simulation_level
-    global win_count
-    global loss_count
-    global box_win_count
+    global level
+    global wins
+    global losses
     global prediction_message_id
 
     history = get_history()
 
     if not history:
-        print("No history")
+        print("No history received")
         return
 
-    current_data = get_current_period()
+    periods = get_periods()
 
-    current_period = current_data.get("current", "")
-    next_period = current_data.get("next", "")
-
-    if not current_period:
-        print("Current period not found")
-        return
-
-    history_cache = history
+    next_period = periods["next"]
 
     latest = history[0]
 
@@ -403,55 +362,55 @@ def process_new_game_state():
     completed_number = latest["number"]
     completed_size = latest["size"]
 
-    # -----------------------------------------------------
-    # FIRST RUN
-    # -----------------------------------------------------
+    history_cache = history
+
+    # =========================
+    # FIRST START
+    # =========================
 
     if last_completed_issue is None:
 
         last_completed_issue = completed_issue
 
         print(
-            "BOT STARTED FROM ISSUE:",
+            "STARTED FROM:",
             completed_issue
         )
 
-        # First prediction
         if next_period:
 
-            pred, reason = pattern_prediction(history)
+            pred, reason = make_prediction(
+                history
+            )
 
             if pred:
 
                 prediction = {
                     "issue": next_period,
                     "prediction": pred,
-                    "reason": reason,
-                    "level": simulation_level
+                    "reason": reason
                 }
 
                 last_prediction_issue = next_period
 
-                text = make_prediction_message(
-                    next_period,
-                    pred,
-                    reason,
-                    simulation_level
+                post_channel(
+                    prediction_text(
+                        next_period,
+                        pred
+                    )
                 )
 
-                send_new_channel_message(text)
-
                 print(
-                    "FIRST PREDICTION:",
+                    "PREDICTION:",
                     next_period,
                     pred
                 )
 
         return
 
-    # -----------------------------------------------------
-    # NEW COMPLETED RESULT
-    # -----------------------------------------------------
+    # =========================
+    # NEW RESULT
+    # =========================
 
     if completed_issue != last_completed_issue:
 
@@ -469,115 +428,79 @@ def process_new_game_state():
 
             if predicted_issue == completed_issue:
 
-                predicted_size = prediction["prediction"]
+                pred = prediction["prediction"]
 
-                if predicted_size == completed_size:
+                if pred == completed_size:
 
                     status = "WIN"
 
-                    win_count += 1
-                    box_win_count += 1
+                    wins += 1
 
-                    # WIN => reset simulation level
-                    simulation_level = 1
-
-                    result_text = make_result_message(
-                        completed_issue,
-                        completed_number,
-                        completed_size,
-                        predicted_size,
-                        status,
-                        simulation_level
-                    )
-
-                    # After 10 wins create a new box/message
-                    if box_win_count >= 10:
-
-                        prediction_message_id = None
-                        box_win_count = 0
-
-                        send_new_channel_message(
-                            result_text
-                        )
-
-                    else:
-
-                        edit_channel_message(
-                            result_text
-                        )
+                    # WIN = reset to level 1
+                    level = 1
 
                 else:
 
                     status = "LOSS"
 
-                    loss_count += 1
+                    losses += 1
 
-                    # Non-money simulation level progression.
-                    # No stake/bet is executed.
-                    if simulation_level < 7:
-                        simulation_level += 1
+                    # Non-money simulation level
+                    if level < 7:
+                        level += 1
 
-                    result_text = make_result_message(
+                update_channel(
+                    result_text(
                         completed_issue,
                         completed_number,
                         completed_size,
-                        predicted_size,
-                        status,
-                        simulation_level
+                        pred,
+                        status
                     )
-
-                    edit_channel_message(
-                        result_text
-                    )
+                )
 
                 print(
-                    "RESULT:",
                     status,
                     "LEVEL:",
-                    simulation_level
+                    level
                 )
 
         last_completed_issue = completed_issue
-
         prediction = None
 
-    # -----------------------------------------------------
-    # NEW NEXT PERIOD PREDICTION
-    # -----------------------------------------------------
+    # =========================
+    # NEXT PREDICTION
+    # =========================
 
     if next_period:
 
         if next_period != last_prediction_issue:
 
-            pred, reason = pattern_prediction(history)
+            pred, reason = make_prediction(
+                history
+            )
 
             if pred:
 
                 prediction = {
                     "issue": next_period,
                     "prediction": pred,
-                    "reason": reason,
-                    "level": simulation_level
+                    "reason": reason
                 }
 
                 last_prediction_issue = next_period
 
-                text = make_prediction_message(
-                    next_period,
-                    pred,
-                    reason,
-                    simulation_level
+                update_channel(
+                    prediction_text(
+                        next_period,
+                        pred
+                    )
                 )
 
-                # New prediction goes into same box/message
-                edit_channel_message(text)
-
                 print(
-                    "NEW PREDICTION:",
+                    "NEXT:",
                     next_period,
-                    pred,
-                    "LEVEL:",
-                    simulation_level
+                    pred
                 )
 
             else:
@@ -589,10 +512,6 @@ def process_new_game_state():
                 )
 
 
-# =========================================================
-# BACKGROUND LOOP
-# =========================================================
-
 def game_loop():
 
     print("GAME LOOP STARTED")
@@ -600,11 +519,9 @@ def game_loop():
     while True:
 
         try:
-
-            process_new_game_state()
+            process_game()
 
         except Exception as e:
-
             print(
                 "GAME LOOP ERROR:",
                 repr(e)
@@ -613,17 +530,17 @@ def game_loop():
         time.sleep(POLL_SECONDS)
 
 
-# =========================================================
-# TELEGRAM COMMAND LISTENER
-# =========================================================
+# =========================
+# TELEGRAM OWNER LISTENER
+# =========================
 
 def bot_listener():
 
     global owner_chat_id
 
-    last_update_id = 0
+    offset = 0
 
-    print("TELEGRAM LISTENER STARTED")
+    print("BOT LISTENER STARTED")
 
     while True:
 
@@ -637,7 +554,7 @@ def bot_listener():
             response = requests.get(
                 url,
                 params={
-                    "offset": last_update_id + 1,
+                    "offset": offset + 1,
                     "timeout": 20
                 },
                 timeout=30
@@ -646,177 +563,189 @@ def bot_listener():
             data = response.json()
 
             if not data.get("ok"):
-
                 print(
-                    "GET UPDATES ERROR:",
+                    "UPDATE ERROR:",
                     data
                 )
-
                 time.sleep(5)
                 continue
 
-            for update in data.get("result", []):
+            for update in data.get(
+                "result",
+                []
+            ):
 
-                last_update_id = update["update_id"]
+                offset = update["update_id"]
 
-                message = update.get("message")
+                message = update.get(
+                    "message"
+                )
 
                 if not message:
                     continue
 
-                chat = message.get("chat", {})
-
-                chat_id = chat.get("id")
+                chat_id = message["chat"]["id"]
 
                 text = message.get(
                     "text",
                     ""
                 ).strip()
 
-                if not chat_id:
-                    continue
-
-                # -------------------------------------------------
-                # OWNER SETUP
-                # -------------------------------------------------
-
+                # First /start becomes owner
                 if owner_chat_id is None:
 
                     if text.startswith("/start"):
 
                         owner_chat_id = chat_id
 
-                        telegram_send(
+                        send_message(
                             chat_id,
                             "✅ Owner connected.\n"
-                            "VeerGame Predictor live mode."
+                            "VeerGame Predictor running."
                         )
 
                         print(
-                            "OWNER CHAT ID SET:",
+                            "OWNER:",
                             owner_chat_id
                         )
 
                     continue
 
-                # -------------------------------------------------
-                # ONLY OWNER
-                # -------------------------------------------------
-
+                # Ignore everyone except owner
                 if chat_id != owner_chat_id:
-
-                    # Ignore everyone else
                     continue
-
-                # -------------------------------------------------
-                # COMMANDS
-                # -------------------------------------------------
 
                 if text.startswith("/start"):
 
-                    telegram_send(
+                    send_message(
                         chat_id,
-                        "✅ VeerGame Predictor running.\n\n"
-                        f"Level: {simulation_level}/7\n"
-                        f"Wins: {win_count}\n"
-                        f"Losses: {loss_count}"
+                        "✅ BOT RUNNING\n\n"
+                        f"Level: {level}/7\n"
+                        f"Wins: {wins}\n"
+                        f"Losses: {losses}"
                     )
 
                 elif text.startswith("/status"):
 
-                    telegram_send(
+                    send_message(
                         chat_id,
-                        "📊 BOT STATUS\n"
-                        "━━━━━━━━━━━━━━\n"
-                        f"Level: {simulation_level}/7\n"
-                        f"Wins: {win_count}\n"
-                        f"Losses: {loss_count}\n"
-                        f"Current prediction: "
-                        f"{prediction}"
+                        "📊 STATUS\n"
+                        "━━━━━━━━━━━━\n"
+                        f"Level: {level}/7\n"
+                        f"Wins: {wins}\n"
+                        f"Losses: {losses}\n"
+                        f"Prediction: {prediction}"
                     )
 
                 elif text.startswith("/history"):
 
-                    latest_text = []
+                    lines = []
 
                     for item in history_cache[:15]:
 
-                        latest_text.append(
-                            f"{item['issue']} "
-                            f"{item['number']} "
+                        lines.append(
+                            f"{item['issue']} | "
+                            f"{item['number']} | "
                             f"{item['size']}"
                         )
 
-                    if latest_text:
+                    if lines:
 
-                        telegram_send(
+                        send_message(
                             chat_id,
-                            "📚 LAST 15 RESULTS\n\n"
-                            + "\n".join(latest_text)
+                            "📚 LAST 15\n\n"
+                            + "\n".join(lines)
                         )
 
                     else:
 
-                        telegram_send(
+                        send_message(
                             chat_id,
-                            "History abhi available nahi hai."
+                            "History available nahi hai."
                         )
 
                 elif text.startswith("/reset"):
 
-                    simulation_level = 1
-                    win_count = 0
-                    loss_count = 0
-                    box_win_count = 0
+                    level = 1
+                    wins = 0
+                    losses = 0
 
-                    telegram_send(
+                    send_message(
                         chat_id,
-                        "♻️ Simulation stats reset.\n"
-                        "Level = 1/7"
+                        "♻️ Simulation reset.\n"
+                        "Level: 1/7"
                     )
 
         except Exception as e:
 
             print(
-                "BOT LISTENER ERROR:",
+                "LISTENER ERROR:",
                 repr(e)
             )
 
             time.sleep(5)
 
 
-# =========================================================
+# =========================
 # WEB
-# =========================================================
+# =========================
 
 @app.route("/")
 def home():
-
-    return (
-        "VeerGame Predictor is running."
-    )
+    return "VeerGame Predictor is running!"
 
 
 @app.route("/test")
 def test():
 
     return {
-        "bot_token_present": bool(BOT_TOKEN),
-        "channel_id": CHANNEL_ID,
-        "history_url": HISTORY_URL,
-        "current_url": CURRENT_URL,
-        "level": simulation_level,
-        "wins": win_count,
-        "losses": loss_count,
-        "prediction": prediction
+        "running": True,
+        "token_present": bool(BOT_TOKEN),
+        "channel": CHANNEL_ID,
+        "level": level,
+        "wins": wins,
+        "losses": losses
     }
 
 
-# =========================================================
+# =========================
 # START
-# =========================================================
+# =========================
 
 if __name__ == "__main__":
 
-    print("================================"
-    print("VEERGAME PRED
+    print("================================")
+    print("VEERGAME PREDICTOR STARTING")
+    print("================================")
+
+    print(
+        "TOKEN PRESENT:",
+        bool(BOT_TOKEN)
+    )
+
+    print(
+        "CHANNEL:",
+        CHANNEL_ID
+    )
+
+    threading.Thread(
+        target=bot_listener,
+        daemon=True
+    ).start()
+
+    threading.Thread(
+        target=game_loop,
+        daemon=True
+    ).start()
+
+    port = int(
+        os.environ.get(
+            "PORT",
+            10000
+        )
+    )
+
+    app.run(
+        host="0.0.0.0",
+        port=port
+    )
