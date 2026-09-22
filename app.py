@@ -2,13 +2,11 @@ import os
 import time
 import threading
 import requests
+import json
 
 from flask import Flask, request, jsonify
 
-
-# =========================================================
-# CONFIG
-# =========================================================
+app = Flask(__name__)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "@VeerGameBot369")
@@ -16,18 +14,10 @@ BRIDGE_KEY = os.environ.get("BRIDGE_KEY", "veerbridge")
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-app = Flask(__name__)
-
-
-# =========================================================
-# SHARED DATA
-# =========================================================
-
 history = []
 last_history_update = 0
 
 last_processed_issue = None
-
 current_prediction = None
 current_prediction_issue = None
 
@@ -35,35 +25,37 @@ wins = 0
 losses = 0
 level = 1
 
-bot_running = True
-
 telegram_offset = 0
 
 
-# =========================================================
+# =========================
+# CORS
+# =========================
+
+@app.after_request
+def cors(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    return response
+
+
+# =========================
 # BIG / SMALL
-# =========================================================
+# =========================
 
 def big_small(number):
     try:
-        n = int(number)
-
-        if n >= 5:
-            return "BIG"
-
-        return "SMALL"
-
+        return "BIG" if int(number) >= 5 else "SMALL"
     except Exception:
         return None
 
 
-# =========================================================
+# =========================
 # TELEGRAM
-# =========================================================
+# =========================
 
 def telegram_send(text):
     try:
-        response = requests.post(
+        r = requests.post(
             f"{TELEGRAM_API}/sendMessage",
             json={
                 "chat_id": CHANNEL_ID,
@@ -72,88 +64,45 @@ def telegram_send(text):
             timeout=15
         )
 
-        return response.ok
+        print("TELEGRAM:", r.status_code)
+        return r.ok
 
     except Exception as e:
-        print("TELEGRAM SEND ERROR:", repr(e))
+        print("TELEGRAM ERROR:", repr(e))
         return False
 
 
-def telegram_get_updates():
-    global telegram_offset
-
-    try:
-        response = requests.get(
-            f"{TELEGRAM_API}/getUpdates",
-            params={
-                "offset": telegram_offset,
-                "timeout": 10
-            },
-            timeout=20
-        )
-
-        if not response.ok:
-            return []
-
-        data = response.json()
-
-        if not data.get("ok"):
-            return []
-
-        return data.get("result", [])
-
-    except Exception as e:
-        print("TELEGRAM UPDATE ERROR:", repr(e))
-        return []
-
-
-# =========================================================
-# PREDICTION ENGINE
-# =========================================================
+# =========================
+# PREDICTION
+# =========================
 
 def make_prediction(rows):
-    """
-    Uses the latest 15 BIG/SMALL results.
-
-    The API list is newest -> oldest.
-
-    We search historical sequences from longer to shorter.
-    If the same sequence appeared earlier, we look at what
-    result followed it historically.
-
-    If no useful historical continuation exists, return WAIT.
-    """
 
     if len(rows) < 15:
         return None
 
-    newest_first = []
+    newest = []
 
     for row in rows[:15]:
         value = big_small(row.get("number"))
 
         if value:
-            newest_first.append(value)
+            newest.append(value)
 
-    if len(newest_first) < 15:
+    if len(newest) < 15:
         return None
 
-    # Convert to oldest -> newest
-    sequence = list(reversed(newest_first))
+    sequence = list(reversed(newest))
 
-    # Search longest pattern first
     for pattern_length in range(7, 0, -1):
 
         target = sequence[-pattern_length:]
 
         followers = []
 
-        # Look through older history
-        for i in range(0, len(sequence) - pattern_length):
+        for i in range(len(sequence) - pattern_length):
 
-            part = sequence[i:i + pattern_length]
-
-            if part == target:
+            if sequence[i:i + pattern_length] == target:
 
                 next_index = i + pattern_length
 
@@ -174,11 +123,12 @@ def make_prediction(rows):
     return None
 
 
-# =========================================================
-# RESULT PROCESSING
-# =========================================================
+# =========================
+# PROCESS RESULT
+# =========================
 
 def process_prediction(rows):
+
     global last_processed_issue
     global current_prediction
     global current_prediction_issue
@@ -197,7 +147,6 @@ def process_prediction(rows):
     if not issue or number is None:
         return
 
-    # Already processed this period
     if issue == last_processed_issue:
         return
 
@@ -206,36 +155,26 @@ def process_prediction(rows):
     actual = big_small(number)
 
     print(
-        "NEW RESULT:",
+        "RESULT:",
         issue,
         number,
         actual
     )
 
-    # -----------------------------------------------------
     # Check previous prediction
-    # -----------------------------------------------------
-
-    if (
-        current_prediction
-        and current_prediction_issue
-        and current_prediction_issue != issue
-    ):
+    if current_prediction:
 
         if current_prediction == actual:
 
             wins += 1
-
-            # Reset simulation level after WIN
             level = 1
 
-            result_text = (
+            telegram_send(
                 "✅ SIMULATION WIN\n\n"
                 f"Period: {current_prediction_issue}\n"
                 f"Prediction: {current_prediction}\n"
                 f"Result: {actual}\n\n"
-                f"Total WIN: {wins}\n"
-                f"Total LOSS: {losses}\n"
+                f"WIN: {wins} | LOSS: {losses}\n"
                 f"Level: {level}"
             )
 
@@ -243,28 +182,19 @@ def process_prediction(rows):
 
             losses += 1
 
-            # Move to next simulation level
             if level < 7:
                 level += 1
 
-            result_text = (
+            telegram_send(
                 "❌ SIMULATION LOSS\n\n"
                 f"Period: {current_prediction_issue}\n"
                 f"Prediction: {current_prediction}\n"
                 f"Result: {actual}\n\n"
-                f"Total WIN: {wins}\n"
-                f"Total LOSS: {losses}\n"
-                f"Next level: {level}"
+                f"WIN: {wins} | LOSS: {losses}\n"
+                f"Next Level: {level}"
             )
 
-        print(result_text)
-
-        telegram_send(result_text)
-
-    # -----------------------------------------------------
-    # Make prediction for next period
-    # -----------------------------------------------------
-
+    # New prediction
     prediction = make_prediction(rows)
 
     if prediction:
@@ -277,18 +207,20 @@ def process_prediction(rows):
         current_prediction = prediction
         current_prediction_issue = next_issue
 
-        prediction_text = (
+        telegram_send(
             "🎯 VEERGAME ANALYSIS\n\n"
             f"Next Period: {next_issue}\n"
             f"Prediction: {prediction}\n"
             f"Analysis Level: {level}\n\n"
             f"WIN: {wins} | LOSS: {losses}\n"
-            f"Mode: Simulation"
+            "Mode: Simulation"
         )
 
-        print(prediction_text)
-
-        telegram_send(prediction_text)
+        print(
+            "PREDICTION:",
+            next_issue,
+            prediction
+        )
 
     else:
 
@@ -297,27 +229,24 @@ def process_prediction(rows):
 
         telegram_send(
             "⏳ VEERGAME ANALYSIS\n\n"
-            "Next period: WAIT\n"
-            "Reason: No sufficiently supported historical pattern."
+            "Next Period: WAIT\n"
+            "No sufficiently supported historical pattern."
         )
 
 
-# =========================================================
+# =========================
 # BROWSER BRIDGE
-# =========================================================
+# =========================
 
-@app.route("/")
-def home():
-    return "VeerGame Predictor is running"
-
-
-@app.route("/push-history", methods=["POST", "OPTIONS"])
+@app.route("/push-history", methods=["POST"])
 def push_history():
 
-    if request.method == "OPTIONS":
-        return "", 204
+    global history
+    global last_history_update
 
-    key = request.headers.get("X-Bridge-Key")
+    # Read simple form request.
+    # This avoids browser CORS preflight.
+    key = request.form.get("key")
 
     if key != BRIDGE_KEY:
         return jsonify({
@@ -325,12 +254,21 @@ def push_history():
             "error": "Invalid bridge key"
         }), 401
 
-    data = request.get_json(silent=True)
+    payload = request.form.get("payload")
 
-    if not data:
+    if not payload:
         return jsonify({
             "ok": False,
-            "error": "No JSON received"
+            "error": "No payload"
+        }), 400
+
+    try:
+        data = json.loads(payload)
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "error": "Invalid JSON",
+            "detail": str(e)
         }), 400
 
     rows = data.get("list", [])
@@ -341,18 +279,17 @@ def push_history():
             "error": "Invalid history"
         }), 400
 
-    global history
-    global last_history_update
-
     history = rows
-    last_history_update = data.get("timestamp", int(time.time() * 1000))
+    last_history_update = data.get(
+        "timestamp",
+        int(time.time() * 1000)
+    )
 
     print(
         "HISTORY RECEIVED:",
         len(history)
     )
 
-    # Process immediately
     try:
         process_prediction(history)
     except Exception as e:
@@ -368,6 +305,10 @@ def push_history():
     })
 
 
+# =========================
+# HISTORY
+# =========================
+
 @app.route("/history")
 def get_history():
 
@@ -379,11 +320,15 @@ def get_history():
     })
 
 
+# =========================
+# TEST
+# =========================
+
 @app.route("/test")
 def test():
 
     return jsonify({
-        "running": bot_running,
+        "running": True,
         "history_count": len(history),
         "last_update": last_history_update,
         "prediction": current_prediction,
@@ -394,9 +339,9 @@ def test():
     })
 
 
-# =========================================================
-# TELEGRAM COMMAND LISTENER
-# =========================================================
+# =========================
+# TELEGRAM LISTENER
+# =========================
 
 def telegram_listener():
 
@@ -406,107 +351,125 @@ def telegram_listener():
 
     while True:
 
-        updates = telegram_get_updates()
+        try:
 
-        for update in updates:
+            r = requests.get(
+                f"{TELEGRAM_API}/getUpdates",
+                params={
+                    "offset": telegram_offset,
+                    "timeout": 10
+                },
+                timeout=20
+            )
 
-            telegram_offset = update["update_id"] + 1
+            data = r.json()
 
-            message = update.get("message")
-
-            if not message:
+            if not data.get("ok"):
+                time.sleep(2)
                 continue
 
-            text = message.get("text", "")
+            for update in data.get("result", []):
 
-            chat = message.get("chat", {})
+                telegram_offset = update["update_id"] + 1
 
-            chat_id = chat.get("id")
+                message = update.get("message")
 
-            if not text or not chat_id:
-                continue
+                if not message:
+                    continue
 
-            if text.startswith("/start"):
+                text = message.get("text", "")
+                chat_id = message.get("chat", {}).get("id")
 
-                requests.post(
-                    f"{TELEGRAM_API}/sendMessage",
-                    json={
-                        "chat_id": chat_id,
-                        "text": (
-                            "✅ VeerGame Predictor connected.\n\n"
-                            "Commands:\n"
-                            "/status\n"
-                            "/history\n"
-                            "/reset"
-                        )
-                    },
-                    timeout=15
-                )
+                if not text or not chat_id:
+                    continue
 
-            elif text.startswith("/status"):
+                if text.startswith("/start"):
 
-                requests.post(
-                    f"{TELEGRAM_API}/sendMessage",
-                    json={
-                        "chat_id": chat_id,
-                        "text": (
-                            "📊 STATUS\n\n"
-                            f"Prediction: {current_prediction}\n"
-                            f"Period: {current_prediction_issue}\n"
-                            f"WIN: {wins}\n"
-                            f"LOSS: {losses}\n"
-                            f"Level: {level}\n"
-                            f"History: {len(history)}"
-                        )
-                    },
-                    timeout=15
-                )
-
-            elif text.startswith("/history"):
-
-                recent = history[:15]
-
-                lines = []
-
-                for row in recent:
-
-                    issue = row.get("issueNumber")
-                    number = row.get("number")
-                    bs = big_small(number)
-
-                    lines.append(
-                        f"{issue} → {number} → {bs}"
+                    requests.post(
+                        f"{TELEGRAM_API}/sendMessage",
+                        json={
+                            "chat_id": chat_id,
+                            "text": (
+                                "✅ VeerGame Predictor connected.\n\n"
+                                "/status\n"
+                                "/history\n"
+                                "/reset"
+                            )
+                        },
+                        timeout=15
                     )
 
-                requests.post(
-                    f"{TELEGRAM_API}/sendMessage",
-                    json={
-                        "chat_id": chat_id,
-                        "text": (
-                            "📜 LAST RESULTS\n\n"
-                            + "\n".join(lines)
+                elif text.startswith("/status"):
+
+                    requests.post(
+                        f"{TELEGRAM_API}/sendMessage",
+                        json={
+                            "chat_id": chat_id,
+                            "text": (
+                                "📊 STATUS\n\n"
+                                f"Prediction: {current_prediction}\n"
+                                f"Period: {current_prediction_issue}\n"
+                                f"WIN: {wins}\n"
+                                f"LOSS: {losses}\n"
+                                f"Level: {level}\n"
+                                f"History: {len(history)}"
+                            )
+                        },
+                        timeout=15
+                    )
+
+                elif text.startswith("/history"):
+
+                    lines = []
+
+                    for row in history[:15]:
+
+                        issue = row.get("issueNumber")
+                        number = row.get("number")
+                        result = big_small(number)
+
+                        lines.append(
+                            f"{issue} → {number} → {result}"
                         )
-                    },
-                    timeout=15
-                )
 
-            elif text.startswith("/reset"):
+                    requests.post(
+                        f"{TELEGRAM_API}/sendMessage",
+                        json={
+                            "chat_id": chat_id,
+                            "text": (
+                                "📜 LAST 15 RESULTS\n\n"
+                                + "\n".join(lines)
+                            )
+                        },
+                        timeout=15
+                    )
 
-                reset_state()
+                elif text.startswith("/reset"):
 
-                requests.post(
-                    f"{TELEGRAM_API}/sendMessage",
-                    json={
-                        "chat_id": chat_id,
-                        "text": "♻️ Simulation statistics reset."
-                    },
-                    timeout=15
-                )
+                    reset_state()
+
+                    requests.post(
+                        f"{TELEGRAM_API}/sendMessage",
+                        json={
+                            "chat_id": chat_id,
+                            "text": "♻️ Simulation reset."
+                        },
+                        timeout=15
+                    )
+
+        except Exception as e:
+
+            print(
+                "TELEGRAM LISTENER ERROR:",
+                repr(e)
+            )
+
+            time.sleep(3)
 
 
-# =========================================================
+# =========================
 # RESET
-# =========================================================
+# =========================
 
 def reset_state():
 
@@ -523,27 +486,12 @@ def reset_state():
 
     current_prediction = None
     current_prediction_issue = None
-
     last_processed_issue = None
 
 
-# =========================================================
-# START BACKGROUND LISTENER
-# =========================================================
-
-def start_background_threads():
-
-    thread = threading.Thread(
-        target=telegram_listener,
-        daemon=True
-    )
-
-    thread.start()
-
-
-# =========================================================
+# =========================
 # MAIN
-# =========================================================
+# =========================
 
 if __name__ == "__main__":
 
@@ -561,7 +509,10 @@ if __name__ == "__main__":
         CHANNEL_ID
     )
 
-    start_background_threads()
+    threading.Thread(
+        target=telegram_listener,
+        daemon=True
+    ).start()
 
     port = int(
         os.environ.get(
@@ -573,4 +524,4 @@ if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
         port=port
-            )
+    )
