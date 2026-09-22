@@ -3,6 +3,7 @@ import json
 import time
 import threading
 import requests
+from curl_cffi import requests as curl_requests
 from datetime import datetime
 
 from flask import Flask, request, jsonify
@@ -20,10 +21,8 @@ PORT = int(os.getenv("PORT", "10000"))
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-# VeerGame6 API (auto-fetch)
 GAME_API = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json"
 
-# Fetch interval (seconds)
 FETCH_INTERVAL = 60
 
 
@@ -131,7 +130,6 @@ def make_prediction(rows):
     if len(sequence) < 10:
         return None
 
-    # Pattern matching (last 10)
     for pattern_length in range(10, 1, -1):
         if len(sequence) <= pattern_length:
             continue
@@ -152,7 +150,6 @@ def make_prediction(rows):
             if small_count > big_count:
                 return "SMALL"
 
-    # Frequency fallback (last 10)
     recent = sequence[:10]
     big_count = recent.count("BIG")
     small_count = recent.count("SMALL")
@@ -319,7 +316,6 @@ def process_prediction(rows):
 
     print("NEW RESULT:", latest_issue, latest_result, flush=True)
 
-    # First result
     if last_processed_issue is None:
         last_processed_issue = latest_issue
 
@@ -346,7 +342,6 @@ def process_prediction(rows):
         print("FIRST PREDICTION:", next_issue, prediction, flush=True)
         return
 
-    # Evaluate previous
     if (
         current_prediction_issue
         and latest_issue == current_prediction_issue
@@ -370,7 +365,6 @@ def process_prediction(rows):
 
     last_processed_issue = latest_issue
 
-    # Next prediction
     prediction = make_prediction(rows)
 
     if prediction is None:
@@ -407,20 +401,16 @@ def process_prediction(rows):
 
 def fetch_game_history():
     try:
-        response = requests.get(
+        response = curl_requests.get(
             GAME_API,
             params={"pageNo": 1, "pageSize": 50},
             headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 "Accept": "application/json, text/plain, */*",
                 "Accept-Language": "en-US,en;q=0.9",
                 "Referer": "https://www.veergame6.com/",
                 "Origin": "https://www.veergame6.com",
-                "Connection": "keep-alive",
-                "Sec-Fetch-Dest": "empty",
-                "Sec-Fetch-Mode": "cors",
-                "Sec-Fetch-Site": "cross-site"
             },
+            impersonate="chrome120",
             timeout=20
         )
 
@@ -557,7 +547,7 @@ def telegram_listener():
 
 
 # =========================================================
-# ROUTES (for testing)
+# ROUTES
 # =========================================================
 
 @app.route("/")
@@ -609,11 +599,7 @@ if __name__ == "__main__":
     if not BOT_TOKEN:
         print("WARNING: BOT_TOKEN is missing", flush=True)
 
-    # Telegram commands listener
     threading.Thread(target=telegram_listener, daemon=True).start()
-
-    # Game API poller (bridge)
     threading.Thread(target=api_poller, daemon=True).start()
 
-    # Flask server
     app.run(host="0.0.0.0", port=PORT, debug=False)
