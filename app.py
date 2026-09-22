@@ -49,7 +49,11 @@ def make_prediction():
 
 
 def bot_listener():
-    global last_update_id
+    global last_update_idif text.startswith("/start"):
+    telegram_send(
+        chat_id,
+        make_prediction()
+    )
 
     print("BOT LISTENER STARTED")
 
