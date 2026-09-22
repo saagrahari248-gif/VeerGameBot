@@ -28,15 +28,19 @@ def telegram_send(chat_id, text):
             },
             timeout=10
         )
+
         print("SEND:", r.status_code, r.text)
         return r
+
     except Exception as e:
         print("SEND ERROR:", e)
 
 
 def make_prediction():
     now = datetime.now(ZoneInfo("Asia/Kolkata"))
+
     period = now.strftime("%Y%m%d%H%M")
+
     prediction = random.choice(["BIG", "SMALL"])
 
     return (
@@ -49,11 +53,7 @@ def make_prediction():
 
 
 def bot_listener():
-    global last_update_idif text.startswith("/start"):
-    telegram_send(
-        chat_id,
-        make_prediction()
-    )
+    global last_update_id
 
     print("BOT LISTENER STARTED")
 
@@ -78,6 +78,7 @@ def bot_listener():
                 continue
 
             for update in data.get("result", []):
+
                 last_update_id = update["update_id"]
 
                 message = update.get("message")
@@ -86,6 +87,7 @@ def bot_listener():
                     continue
 
                 chat_id = message["chat"]["id"]
+
                 text = message.get("text", "")
 
                 print("MESSAGE:", text)
@@ -116,9 +118,11 @@ def test():
 
 
 if __name__ == "__main__":
+
     print("APP STARTING")
 
     print("TOKEN PRESENT:", bool(TOKEN))
+
     print("CHANNEL ID PRESENT:", bool(CHANNEL_ID))
 
     threading.Thread(
@@ -132,5 +136,3 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=port
     )
-    
-    
