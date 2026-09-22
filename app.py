@@ -116,11 +116,14 @@ def test():
 
 
 if __name__ == "__main__":
-    print("APP STARTING")requests.get(
-    f"https://api.telegram.org/bot{TOKEN}/deleteWebhook",
-    params={"drop_pending_updates": True},
-    timeout=10
+    print("APP STARTING")
+
+    requests.get(
+        f"https://api.telegram.org/bot{TOKEN}/deleteWebhook",
+        params={"drop_pending_updates": True},
+        timeout=10
     )
+
     print("TOKEN PRESENT:", bool(TOKEN))
     print("CHANNEL ID PRESENT:", bool(CHANNEL_ID))
 
