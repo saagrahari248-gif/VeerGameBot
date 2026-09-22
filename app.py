@@ -118,12 +118,6 @@ def test():
 if __name__ == "__main__":
     print("APP STARTING")
 
-    requests.get(
-        f"https://api.telegram.org/bot{TOKEN}/deleteWebhook",
-        params={"drop_pending_updates": True},
-        timeout=10
-    )
-
     print("TOKEN PRESENT:", bool(TOKEN))
     print("CHANNEL ID PRESENT:", bool(CHANNEL_ID))
 
@@ -134,6 +128,10 @@ if __name__ == "__main__":
 
     port = int(os.environ.get("PORT", 10000))
 
+    app.run(
+        host="0.0.0.0",
+        port=port
+    )
     app.run(
         host="0.0.0.0",
         port=port
