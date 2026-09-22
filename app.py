@@ -1,63 +1,207 @@
 import os
+import json
 import time
 import threading
 import requests
-import json
+
 from flask import Flask, request, jsonify
 
-app = Flask(__name__)
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "@VeerGameBot369")
-BRIDGE_KEY = os.environ.get("BRIDGE_KEY", "veerbridge")
+# =========================================================
+# CONFIG
+# =========================================================
+
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+CHANNEL_ID = os.getenv("CHANNEL_ID", "@VeerGameBot369").strip()
+BRIDGE_KEY = os.getenv("BRIDGE_KEY", "veerbridge").strip()
+
+PORT = int(os.getenv("PORT", "10000"))
 
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
+
+# =========================================================
+# APP
+# =========================================================
+
+app = Flask(__name__)
+
+
+# =========================================================
+# STATE
+# =========================================================
+
 history = []
-last_history_update = 0
 
 last_processed_issue = None
 current_prediction = None
 current_prediction_issue = None
 
+level = 1
+
 wins = 0
 losses = 0
-level = 1
+
+rolling_entries = []
 
 telegram_offset = 0
 
-
-# =========================
-# CORS
-# =========================
-
-@app.after_request
-def cors(response):
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    return response
+channel_message_id = None
 
 
-# =========================
-# BIG / SMALL
-# =========================
+# =========================================================
+# BASIC HELPERS
+# =========================================================
 
 def big_small(number):
-
     try:
-        return "BIG" if int(number) >= 5 else "SMALL"
+        n = int(number)
+
+        if n >= 5:
+            return "BIG"
+
+        return "SMALL"
 
     except Exception:
         return None
 
 
-# =========================
-# TELEGRAM SEND
-# =========================
+def normalize_rows(rows):
+    result = []
 
-def telegram_send(text):
+    if not isinstance(rows, list):
+        return result
+
+    seen = set()
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+
+        issue = str(row.get("issueNumber", "")).strip()
+        number = str(row.get("number", "")).strip()
+
+        if not issue or number == "":
+            continue
+
+        if issue in seen:
+            continue
+
+        seen.add(issue)
+
+        result.append({
+            "issueNumber": issue,
+            "number": number,
+            "color": row.get("color"),
+            "premium": row.get("premium"),
+            "sum": row.get("sum")
+        })
+
+    # Latest first
+    result.sort(
+        key=lambda x: int(x["issueNumber"])
+        if x["issueNumber"].isdigit()
+        else 0,
+        reverse=True
+    )
+
+    return result
+
+
+# =========================================================
+# PREDICTION ENGINE
+# =========================================================
+
+def make_prediction(rows):
+    """
+    Statistical/pattern prediction only.
+
+    Uses recent history and looks for historical patterns.
+    If no useful pattern exists, returns a frequency-based
+    signal. This is not a guaranteed prediction.
+    """
+
+    rows = normalize_rows(rows)
+
+    if len(rows) < 5:
+        return None
+
+    sequence = []
+
+    for row in rows:
+        result = big_small(row["number"])
+
+        if result:
+            sequence.append(result)
+
+    if len(sequence) < 5:
+        return None
+
+    # -----------------------------------------------------
+    # Look for repeated historical patterns.
+    # Newest result is sequence[0].
+    # -----------------------------------------------------
+
+    for pattern_length in range(5, 1, -1):
+
+        if len(sequence) <= pattern_length:
+            continue
+
+        target = tuple(sequence[:pattern_length])
+
+        followers = []
+
+        for i in range(pattern_length, len(sequence)):
+
+            older_pattern = tuple(
+                sequence[i - pattern_length:i]
+            )
+
+            if older_pattern == target:
+                followers.append(sequence[i])
+
+        if followers:
+
+            big_count = followers.count("BIG")
+            small_count = followers.count("SMALL")
+
+            if big_count > small_count:
+                return "BIG"
+
+            if small_count > big_count:
+                return "SMALL"
+
+    # -----------------------------------------------------
+    # Recent frequency fallback
+    # -----------------------------------------------------
+
+    recent = sequence[:5]
+
+    big_count = recent.count("BIG")
+    small_count = recent.count("SMALL")
+
+    if big_count > small_count:
+        return "SMALL"
+
+    if small_count > big_count:
+        return "BIG"
+
+    # Equal -> no forced signal
+    return None
+
+
+# =========================================================
+# TELEGRAM
+# =========================================================
+
+def telegram_send_message(text):
+    global channel_message_id
+
+    if not BOT_TOKEN:
+        print("ERROR: BOT_TOKEN missing", flush=True)
+        return None
 
     try:
-
         response = requests.post(
             f"{TELEGRAM_API}/sendMessage",
             json={
@@ -67,626 +211,687 @@ def telegram_send(text):
             timeout=15
         )
 
-        print(
-            "TELEGRAM:",
-            response.status_code,
-            response.text[:300]
-        )
+        data = response.json()
 
-        return response.ok
+        if not data.get("ok"):
+            print(
+                "TELEGRAM SEND ERROR:",
+                data,
+                flush=True
+            )
+            return None
+
+        message_id = data["result"]["message_id"]
+
+        channel_message_id = message_id
+
+        return message_id
 
     except Exception as e:
+        print(
+            "TELEGRAM SEND EXCEPTION:",
+            repr(e),
+            flush=True
+        )
+
+        return None
+
+
+def telegram_edit_message(message_id, text):
+    if not BOT_TOKEN:
+        return False
+
+    try:
+        response = requests.post(
+            f"{TELEGRAM_API}/editMessageText",
+            json={
+                "chat_id": CHANNEL_ID,
+                "message_id": message_id,
+                "text": text
+            },
+            timeout=15
+        )
+
+        data = response.json()
+
+        if data.get("ok"):
+            return True
 
         print(
-            "TELEGRAM ERROR:",
-            repr(e)
+            "TELEGRAM EDIT ERROR:",
+            data,
+            flush=True
+        )
+
+        return False
+
+    except Exception as e:
+        print(
+            "TELEGRAM EDIT EXCEPTION:",
+            repr(e),
+            flush=True
         )
 
         return False
 
 
-# =========================
-# PREDICTION
-# =========================
+# =========================================================
+# FORMAT
+# =========================================================
 
-def make_prediction(rows):
+def format_entry(entry):
+    issue = entry["issue"]
+    prediction = entry["prediction"]
+    status = entry["status"]
 
-    if len(rows) < 5:
-        return None
+    if prediction == "BIG":
+        prediction_icon = "🟢"
+    else:
+        prediction_icon = "🔴"
 
-    sequence = []
+    if status == "WIN":
+        result_icon = "✅"
+    elif status == "LOSS":
+        result_icon = "💔"
+    else:
+        result_icon = "🔮"
 
-    for row in rows:
+    return (
+        f"🎯 {issue} - "
+        f"{prediction_icon} {prediction} …… {result_icon}"
+    )
 
-        result = big_small(
-            row.get("number")
+
+def build_prediction_message():
+
+    lines = []
+
+    lines.append("💀✍🏼 UNDER 6 LEVEL FIXER ✍🏼💀")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("")
+
+    if not rolling_entries:
+        lines.append("⏳ Waiting for first prediction...")
+        lines.append("")
+    else:
+
+        for entry in rolling_entries:
+            lines.append(format_entry(entry))
+
+        lines.append("")
+
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append(
+        f"🔥 LEVEL : {level} / 6"
+    )
+    lines.append(
+        f"💎 WIN : {wins}    💔 LOSS : {losses}"
+    )
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+
+    return "\n".join(lines)
+
+
+# =========================================================
+# MESSAGE UPDATE
+# =========================================================
+
+def publish_message():
+
+    global channel_message_id
+
+    text = build_prediction_message()
+
+    # First message
+    if channel_message_id is None:
+
+        message_id = telegram_send_message(text)
+
+        if message_id:
+            print(
+                "TELEGRAM: FIRST PREDICTION MESSAGE CREATED",
+                message_id,
+                flush=True
+            )
+
+        return
+
+    # Existing message
+    edited = telegram_edit_message(
+        channel_message_id,
+        text
+    )
+
+    if edited:
+
+        print(
+            "TELEGRAM: PREDICTION MESSAGE UPDATED",
+            flush=True
         )
 
-        if result:
-            sequence.append(result)
+    else:
 
-    if len(sequence) < 5:
-        return None
+        # If message cannot be edited, create a new one.
+        message_id = telegram_send_message(text)
 
-    # API newest -> oldest
-    # Convert to oldest -> newest
-    sequence = list(reversed(sequence))
-
-    print(
-        "ANALYSIS SEQUENCE:",
-        sequence
-    )
-
-    # --------------------------------
-    # Pattern search
-    # --------------------------------
-
-    for length in range(
-        min(5, len(sequence) - 1),
-        1,
-        -1
-    ):
-
-        target = sequence[-length:]
-
-        followers = []
-
-        for i in range(
-            len(sequence) - length
-        ):
-
-            if sequence[
-                i:i + length
-            ] == target:
-
-                next_index = i + length
-
-                if next_index < len(sequence):
-
-                    followers.append(
-                        sequence[next_index]
-                    )
-
-        if followers:
-
-            big_count = followers.count(
-                "BIG"
-            )
-
-            small_count = followers.count(
-                "SMALL"
-            )
+        if message_id:
 
             print(
-                "PATTERN:",
-                target,
-                "FOLLOWERS:",
-                followers
+                "TELEGRAM: NEW MESSAGE CREATED",
+                message_id,
+                flush=True
             )
 
-            if big_count > small_count:
-                return "BIG"
 
-            if small_count > big_count:
-                return "SMALL"
-
-    # --------------------------------
-    # Recent frequency fallback
-    # --------------------------------
-
-    recent = sequence[-5:]
-
-    big_count = recent.count(
-        "BIG"
-    )
-
-    small_count = recent.count(
-        "SMALL"
-    )
-
-    if big_count > small_count:
-        return "SMALL"
-
-    if small_count > big_count:
-        return "BIG"
-
-    return None
-
-
-# =========================
-# PROCESS RESULT
-# =========================
+# =========================================================
+# PROCESS NEW GAME RESULT
+# =========================================================
 
 def process_prediction(rows):
 
+    global history
     global last_processed_issue
     global current_prediction
     global current_prediction_issue
+    global level
     global wins
     global losses
-    global level
+    global rolling_entries
+
+    rows = normalize_rows(rows)
 
     if not rows:
         return
 
+    history = rows
+
     latest = rows[0]
 
-    issue = latest.get(
-        "issueNumber"
-    )
+    latest_issue = latest["issueNumber"]
+    latest_result = big_small(latest["number"])
 
-    number = latest.get(
-        "number"
-    )
-
-    if not issue or number is None:
+    if not latest_result:
         return
 
-    # Same result already processed
-    if issue == last_processed_issue:
+    # -----------------------------------------------------
+    # Ignore same period
+    # -----------------------------------------------------
+
+    if latest_issue == last_processed_issue:
         return
-
-    last_processed_issue = issue
-
-    actual = big_small(
-        number
-    )
 
     print(
         "NEW RESULT:",
-        issue,
-        number,
-        actual
+        latest_issue,
+        latest_result,
+        flush=True
     )
 
-    # =========================
-    # CHECK PREVIOUS PREDICTION
-    # =========================
+    # -----------------------------------------------------
+    # First result after startup
+    # No previous prediction to evaluate.
+    # -----------------------------------------------------
 
-    if current_prediction:
+    if last_processed_issue is None:
 
-        if current_prediction == actual:
+        last_processed_issue = latest_issue
+
+        prediction = make_prediction(rows)
+
+        if prediction is None:
+            print(
+                "PREDICTION: WAIT - not enough pattern information",
+                flush=True
+            )
+            return
+
+        try:
+            next_issue = str(int(latest_issue) + 1)
+        except Exception:
+            next_issue = latest_issue + "+1"
+
+        current_prediction = prediction
+        current_prediction_issue = next_issue
+
+        rolling_entries.append({
+            "issue": next_issue,
+            "prediction": prediction,
+            "status": "NEXT"
+        })
+
+        publish_message()
+
+        print(
+            "FIRST PREDICTION:",
+            next_issue,
+            prediction,
+            flush=True
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # Evaluate previous prediction
+    # -----------------------------------------------------
+
+    if (
+        current_prediction_issue
+        and latest_issue == current_prediction_issue
+        and current_prediction
+    ):
+
+        if current_prediction == latest_result:
 
             wins += 1
 
+            # WIN resets simulation level
             level = 1
 
-            telegram_send(
-                "✅ RESULT\n\n"
-                f"Period: {current_prediction_issue}\n"
-                f"Prediction: {current_prediction}\n"
-                f"Result: {actual}\n\n"
-                f"WIN: {wins} | LOSS: {losses}\n"
-                f"Level: {level}"
+            status = "WIN"
+
+            print(
+                "RESULT: WIN",
+                latest_issue,
+                current_prediction,
+                latest_result,
+                flush=True
             )
 
         else:
 
             losses += 1
 
-            if level < 7:
-                level += 1
+            # Increase simulation level
+            level = min(level + 1, 6)
 
-            telegram_send(
-                "❌ RESULT\n\n"
-                f"Period: {current_prediction_issue}\n"
-                f"Prediction: {current_prediction}\n"
-                f"Result: {actual}\n\n"
-                f"WIN: {wins} | LOSS: {losses}\n"
-                f"Next Level: {level}"
+            status = "LOSS"
+
+            print(
+                "RESULT: LOSS",
+                latest_issue,
+                current_prediction,
+                latest_result,
+                "LEVEL:",
+                level,
+                flush=True
             )
 
-    # =========================
-    # NEW PREDICTION
-    # =========================
+        # Update matching entry
+        for entry in rolling_entries:
 
-    prediction = make_prediction(
-        rows
-    )
+            if entry["issue"] == latest_issue:
 
-    try:
+                entry["status"] = status
+                break
 
-        next_issue = str(
-            int(issue) + 1
-        )
+    # -----------------------------------------------------
+    # This result is now processed
+    # -----------------------------------------------------
 
-    except Exception:
+    last_processed_issue = latest_issue
 
-        next_issue = "NEXT"
+    # -----------------------------------------------------
+    # Make next prediction
+    # -----------------------------------------------------
 
-    if prediction:
+    prediction = make_prediction(rows)
 
-        current_prediction = prediction
-
-        current_prediction_issue = next_issue
-
-        telegram_send(
-            "🎯 VEERGAME PREDICTION\n\n"
-            f"Next Period: {next_issue}\n"
-            f"Prediction: {prediction}\n\n"
-            f"Level: {level}\n"
-            f"WIN: {wins} | LOSS: {losses}\n\n"
-            "Mode: Statistical Simulation"
-        )
-
-        print(
-            "PREDICTION:",
-            next_issue,
-            prediction
-        )
-
-    else:
+    if prediction is None:
 
         current_prediction = None
-
         current_prediction_issue = None
 
+        publish_message()
+
         print(
-            "NO CLEAR PREDICTION"
+            "NEXT PREDICTION: WAIT",
+            flush=True
         )
 
-
-# =========================
-# BRIDGE
-# =========================
-
-@app.route(
-    "/push-history",
-    methods=["POST"]
-)
-def push_history():
-
-    global history
-    global last_history_update
-
-    key = request.form.get(
-        "key"
-    )
-
-    if key != BRIDGE_KEY:
-
-        return jsonify({
-            "ok": False,
-            "error": "Invalid bridge key"
-        }), 401
-
-    payload = request.form.get(
-        "payload"
-    )
-
-    if not payload:
-
-        return jsonify({
-            "ok": False,
-            "error": "No payload"
-        }), 400
+        return
 
     try:
+        next_issue = str(int(latest_issue) + 1)
 
-        data = json.loads(
-            payload
-        )
+    except Exception:
+        next_issue = latest_issue + "+1"
 
-    except Exception as e:
+    current_prediction = prediction
+    current_prediction_issue = next_issue
 
-        return jsonify({
-            "ok": False,
-            "error": "Invalid JSON",
-            "detail": str(e)
-        }), 400
+    # -----------------------------------------------------
+    # Rolling 10 entries
+    # -----------------------------------------------------
 
-    rows = data.get(
-        "list",
-        []
-    )
+    rolling_entries.append({
+        "issue": next_issue,
+        "prediction": prediction,
+        "status": "NEXT"
+    })
 
-    if not isinstance(
-        rows,
-        list
-    ):
+    # Keep only latest 10
+    if len(rolling_entries) > 10:
+        rolling_entries = rolling_entries[-10:]
 
-        return jsonify({
-            "ok": False,
-            "error": "Invalid history"
-        }), 400
-
-    history = rows
-
-    last_history_update = data.get(
-        "timestamp",
-        int(time.time() * 1000)
-    )
+    publish_message()
 
     print(
-        "HISTORY RECEIVED:",
-        len(history)
+        "NEXT PREDICTION:",
+        next_issue,
+        prediction,
+        "LEVEL:",
+        level,
+        flush=True
     )
+
+
+# =========================================================
+# BRIDGE
+# =========================================================
+
+@app.route("/push-history", methods=["POST"])
+def push_history():
 
     try:
 
-        process_prediction(
-            history
+        key = request.form.get("key", "")
+        payload_text = request.form.get("payload", "")
+
+        if key != BRIDGE_KEY:
+            return jsonify({
+                "ok": False,
+                "error": "invalid key"
+            }), 403
+
+        if not payload_text:
+            return jsonify({
+                "ok": False,
+                "error": "missing payload"
+            }), 400
+
+        payload = json.loads(payload_text)
+
+        rows = payload.get("list", [])
+
+        rows = normalize_rows(rows)
+
+        if not rows:
+
+            return jsonify({
+                "ok": True,
+                "history_count": 0
+            })
+
+        print(
+            "HISTORY RECEIVED:",
+            len(rows),
+            "LATEST:",
+            rows[0]["issueNumber"],
+            flush=True
         )
+
+        process_prediction(rows)
+
+        return jsonify({
+            "ok": True,
+            "history_count": len(rows),
+            "latest": rows[0],
+            "prediction": current_prediction,
+            "prediction_issue": current_prediction_issue,
+            "level": level,
+            "wins": wins,
+            "losses": losses
+        })
 
     except Exception as e:
 
         print(
-            "PROCESS ERROR:",
-            repr(e)
+            "PUSH HISTORY ERROR:",
+            repr(e),
+            flush=True
         )
+
+        return jsonify({
+            "ok": False,
+            "error": str(e)
+        }), 500
+
+
+# =========================================================
+# TEST / STATUS
+# =========================================================
+
+@app.route("/")
+def home():
 
     return jsonify({
         "ok": True,
-        "history_count": len(history),
-        "latest": (
-            history[0]
-            if history
-            else None
-        )
+        "service": "VeerGame Predictor",
+        "running": True
     })
 
-
-# =========================
-# TEST
-# =========================
 
 @app.route("/test")
 def test():
 
     return jsonify({
+        "ok": True,
         "running": True,
         "history_count": len(history),
-        "last_update": last_history_update,
+        "last_update": int(time.time() * 1000),
         "prediction": current_prediction,
         "prediction_issue": current_prediction_issue,
+        "level": level,
         "wins": wins,
         "losses": losses,
-        "level": level
+        "entries": rolling_entries
     })
 
-
-# =========================
-# HISTORY
-# =========================
 
 @app.route("/history")
 def get_history():
 
     return jsonify({
         "ok": True,
-        "history_count": len(history),
-        "last_update": last_history_update,
+        "count": len(history),
         "list": history
     })
 
 
-# =========================
+# =========================================================
 # TELEGRAM COMMANDS
-# =========================
+# =========================================================
+
+def telegram_get_updates():
+
+    global telegram_offset
+
+    if not BOT_TOKEN:
+        return []
+
+    try:
+
+        response = requests.get(
+            f"{TELEGRAM_API}/getUpdates",
+            params={
+                "offset": telegram_offset,
+                "timeout": 20
+            },
+            timeout=30
+        )
+
+        data = response.json()
+
+        if not data.get("ok"):
+            return []
+
+        return data.get("result", [])
+
+    except Exception as e:
+
+        print(
+            "TELEGRAM UPDATE ERROR:",
+            repr(e),
+            flush=True
+        )
+
+        return []
+
+
+def telegram_reply(chat_id, text):
+
+    try:
+
+        requests.post(
+            f"{TELEGRAM_API}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": text
+            },
+            timeout=15
+        )
+
+    except Exception as e:
+
+        print(
+            "TELEGRAM REPLY ERROR:",
+            repr(e),
+            flush=True
+        )
+
 
 def telegram_listener():
 
     global telegram_offset
 
     print(
-        "TELEGRAM LISTENER STARTED"
+        "TELEGRAM LISTENER STARTED",
+        flush=True
     )
 
     while True:
 
         try:
 
-            response = requests.get(
-                f"{TELEGRAM_API}/getUpdates",
-                params={
-                    "offset": telegram_offset,
-                    "timeout": 10
-                },
-                timeout=20
-            )
+            updates = telegram_get_updates()
 
-            data = response.json()
+            for update in updates:
 
-            if not data.get(
-                "ok"
-            ):
+                telegram_offset = update["update_id"] + 1
 
-                time.sleep(2)
-                continue
-
-            for update in data.get(
-                "result",
-                []
-            ):
-
-                telegram_offset = (
-                    update["update_id"] + 1
-                )
-
-                message = update.get(
-                    "message"
-                )
+                message = update.get("message")
 
                 if not message:
                     continue
 
-                text = message.get(
-                    "text",
-                    ""
-                )
+                chat_id = message["chat"]["id"]
 
-                chat_id = message.get(
-                    "chat",
-                    {}
-                ).get(
-                    "id"
-                )
+                text = message.get("text", "").strip()
 
-                if not text or not chat_id:
-                    continue
+                if text == "/start":
 
-                if text.startswith(
-                    "/start"
-                ):
-
-                    requests.post(
-                        f"{TELEGRAM_API}/sendMessage",
-                        json={
-                            "chat_id": chat_id,
-                            "text":
-                                "✅ VeerGame Predictor connected.\n\n"
-                                "/status\n"
-                                "/history\n"
-                                "/reset"
-                        },
-                        timeout=15
+                    telegram_reply(
+                        chat_id,
+                        "✅ Owner connected.\n"
+                        "💀 Under 6 Level Fixer is running."
                     )
 
-                elif text.startswith(
-                    "/status"
-                ):
+                elif text == "/status":
 
-                    requests.post(
-                        f"{TELEGRAM_API}/sendMessage",
-                        json={
-                            "chat_id": chat_id,
-                            "text":
-                                "📊 STATUS\n\n"
-                                f"Prediction: {current_prediction}\n"
-                                f"Period: {current_prediction_issue}\n"
-                                f"WIN: {wins}\n"
-                                f"LOSS: {losses}\n"
-                                f"Level: {level}\n"
-                                f"History: {len(history)}"
-                        },
-                        timeout=15
+                    telegram_reply(
+                        chat_id,
+                        "💻 VEERGAME STATUS\n\n"
+                        f"🔥 Level: {level}/6\n"
+                        f"💎 Wins: {wins}\n"
+                        f"💔 Losses: {losses}\n"
+                        f"🎯 Prediction: "
+                        f"{current_prediction or 'WAIT'}\n"
+                        f"🎯 Period: "
+                        f"{current_prediction_issue or 'WAIT'}"
                     )
 
-                elif text.startswith(
-                    "/history"
-                ):
+                elif text == "/history":
 
-                    lines = []
+                    if not rolling_entries:
 
-                    for row in history:
-
-                        issue = row.get(
-                            "issueNumber"
+                        telegram_reply(
+                            chat_id,
+                            "⏳ No prediction history yet."
                         )
 
-                        number = row.get(
-                            "number"
+                    else:
+
+                        lines = [
+                            "💀 LAST 10 PREDICTIONS",
+                            "━━━━━━━━━━━━━━━━━━━━"
+                        ]
+
+                        for entry in rolling_entries:
+                            lines.append(
+                                format_entry(entry)
+                            )
+
+                        telegram_reply(
+                            chat_id,
+                            "\n".join(lines)
                         )
 
-                        result = big_small(
-                            number
-                        )
+                elif text == "/reset":
 
-                        lines.append(
-                            f"{issue} → {number} → {result}"
-                        )
-
-                    requests.post(
-                        f"{TELEGRAM_API}/sendMessage",
-                        json={
-                            "chat_id": chat_id,
-                            "text":
-                                "📜 HISTORY\n\n"
-                                + "\n".join(lines)
-                        },
-                        timeout=15
-                    )
-
-                elif text.startswith(
-                    "/reset"
-                ):
-
-                    reset_state()
-
-                    requests.post(
-                        f"{TELEGRAM_API}/sendMessage",
-                        json={
-                            "chat_id": chat_id,
-                            "text":
-                                "♻️ Simulation reset."
-                        },
-                        timeout=15
+                    telegram_reply(
+                        chat_id,
+                        "ℹ️ Reset is disabled in this version."
                     )
 
         except Exception as e:
 
             print(
-                "TELEGRAM ERROR:",
-                repr(e)
+                "TELEGRAM LISTENER ERROR:",
+                repr(e),
+                flush=True
             )
 
-            time.sleep(3)
+        time.sleep(1)
 
 
-# =========================
-# RESET
-# =========================
-
-def reset_state():
-
-    global wins
-    global losses
-    global level
-    global current_prediction
-    global current_prediction_issue
-    global last_processed_issue
-
-    wins = 0
-    losses = 0
-    level = 1
-
-    current_prediction = None
-    current_prediction_issue = None
-
-    last_processed_issue = None
-
-
-# =========================
+# =========================================================
 # START
-# =========================
+# =========================================================
 
 if __name__ == "__main__":
 
-    print(
-        "=============================="
-    )
-
-    print(
-        "VEERGAME PREDICTOR STARTING"
-    )
-
-    print(
-        "=============================="
-    )
+    print("==============================", flush=True)
+    print("VEERGAME PREDICTOR STARTING", flush=True)
+    print("==============================", flush=True)
 
     print(
         "TOKEN PRESENT:",
-        bool(BOT_TOKEN)
+        bool(BOT_TOKEN),
+        flush=True
     )
 
     print(
         "CHANNEL:",
-        CHANNEL_ID
+        CHANNEL_ID,
+        flush=True
     )
 
-    threading.Thread(
+    if not BOT_TOKEN:
+
+        print(
+            "WARNING: BOT_TOKEN is missing",
+            flush=True
+        )
+
+    listener_thread = threading.Thread(
         target=telegram_listener,
         daemon=True
-    ).start()
-
-    port = int(
-        os.environ.get(
-            "PORT",
-            10000
-        )
     )
+
+    listener_thread.start()
 
     app.run(
         host="0.0.0.0",
-        port=port
-    )
+        port=PORT,
+        debug=False
+        )
