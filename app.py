@@ -4,9 +4,6 @@ from flask import Flask
 
 app = Flask(__name__)
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "@VeerGameBot369")
-
 HISTORY_URL = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json"
 
 
@@ -23,23 +20,22 @@ def test():
             HISTORY_URL,
             params={
                 "pageNo": 1,
-                "pageSize": 500
+                "pageSize": 500,
+                "ts": 1790053617323
             },
             headers={
-                "User-Agent": "Mozilla/5.0"
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "application/json,text/plain,*/*",
+                "Referer": "https://www.91apph.com/"
             },
             timeout=20
         )
 
-        data = r.json()
-
-        rows = data.get("data", {}).get("list", [])
-
         return {
             "status_code": r.status_code,
-            "api_code": data.get("code"),
-            "history_count": len(rows),
-            "first_result": rows[0] if rows else None
+            "content_type": r.headers.get("content-type"),
+            "length": len(r.text),
+            "first_500_chars": r.text[:500]
         }
 
     except Exception as e:
@@ -51,11 +47,12 @@ def test():
 
 if __name__ == "__main__":
 
-    print("TEST SERVER STARTING")
-    print("TOKEN:", bool(BOT_TOKEN))
-    print("CHANNEL:", CHANNEL_ID)
-
-    port = int(os.environ.get("PORT", 10000))
+    port = int(
+        os.environ.get(
+            "PORT",
+            10000
+        )
+    )
 
     app.run(
         host="0.0.0.0",
