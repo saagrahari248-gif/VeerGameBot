@@ -1,36 +1,132 @@
-name: Test Game API
+name: Cloud Game Bridge
 
 on:
   workflow_dispatch:
 
 jobs:
-  test:
+  bridge:
     runs-on: ubuntu-latest
+    timeout-minutes: 350
 
     steps:
-      - name: Test WinGo API
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Playwright
         run: |
-          python - <<'PY'
-          import requests
+          npm init -y
+          npm install playwright
+          npx playwright install --with-deps chromium
 
-          url = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json"
+      - name: Run cloud bridge
+        env:
+          RENDER_URL: https://veergamebot.onrender.com
+          BRIDGE_KEY: veerbridge
+        run: |
+          cat > bridge.js <<'EOF'
+          const { chromium } = require("playwright");
 
-          r = requests.get(
-              url,
-              params={
-                  "pageNo": 1,
-                  "pageSize": 500
-              },
-              headers={
-                  "User-Agent": "Mozilla/5.0",
-                  "Accept": "application/json,text/plain,*/*",
-                  "Referer": "https://www.91apph.com/"
-              },
-              timeout=20
-          )
+          const GAME = "https://www.91apph.com/#/";
+          const API =
+            "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json";
 
-          print("STATUS:", r.status_code)
-          print("CONTENT TYPE:", r.headers.get("content-type"))
-          print("RESPONSE:")
-          print(r.text[:1000])
-          PY
+          const RENDER_URL = process.env.RENDER_URL;
+          const BRIDGE_KEY = process.env.BRIDGE_KEY;
+
+          async function main() {
+            const browser = await chromium.launch({
+              headless: true
+            });
+
+            const page = await browser.newPage();
+
+            console.log("Opening game...");
+            await page.goto(GAME, {
+              waitUntil: "domcontentloaded",
+              timeout: 60000
+            });
+
+            console.log("Game opened.");
+
+            let lastIssue = null;
+
+            while (true) {
+              try {
+                const result = await page.evaluate(async (api) => {
+                  const response = await fetch(
+                    api + "?pageNo=1&pageSize=10&ts=" + Date.now(),
+                    {
+                      cache: "no-store"
+                    }
+                  );
+
+                  if (!response.ok) {
+                    throw new Error("GAME API HTTP " + response.status);
+                  }
+
+                  return await response.json();
+                }, API);
+
+                const rows = result.data?.list || [];
+
+                if (rows.length) {
+                  const latest = rows[0];
+
+                  console.log(
+                    new Date().toISOString(),
+                    "ISSUE:",
+                    latest.issueNumber,
+                    "NUMBER:",
+                    latest.number
+                  );
+
+                  if (latest.issueNumber !== lastIssue) {
+                    lastIssue = latest.issueNumber;
+
+                    const response = await fetch(
+                      RENDER_URL + "/push-history",
+                      {
+                        method: "POST",
+                        headers: {
+                          "Content-Type": "application/x-www-form-urlencoded"
+                        },
+                        body:
+                          "key=" +
+                          encodeURIComponent(BRIDGE_KEY) +
+                          "&payload=" +
+                          encodeURIComponent(
+                            JSON.stringify({
+                              list: rows,
+                              timestamp: Date.now()
+                            })
+                          )
+                      }
+                    );
+
+                    console.log(
+                      "RENDER:",
+                      response.status,
+                      await response.text()
+                    );
+                  }
+                }
+              } catch (error) {
+                console.log("BRIDGE ERROR:", error.message);
+              }
+
+              await new Promise(resolve => setTimeout(resolve, 3000));
+            }
+          }
+
+          main().catch(error => {
+            console.error(error);
+            process.exit(1);
+          });
+          EOF
+
+          node bridge.js
