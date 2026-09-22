@@ -42,19 +42,23 @@ def cors(response):
 # =========================
 
 def big_small(number):
+
     try:
         return "BIG" if int(number) >= 5 else "SMALL"
+
     except Exception:
         return None
 
 
 # =========================
-# TELEGRAM
+# TELEGRAM SEND
 # =========================
 
 def telegram_send(text):
+
     try:
-        r = requests.post(
+
+        response = requests.post(
             f"{TELEGRAM_API}/sendMessage",
             json={
                 "chat_id": CHANNEL_ID,
@@ -63,62 +67,95 @@ def telegram_send(text):
             timeout=15
         )
 
-        print("TELEGRAM:", r.status_code, r.text[:300])
-        return r.ok
+        print(
+            "TELEGRAM:",
+            response.status_code,
+            response.text[:300]
+        )
+
+        return response.ok
 
     except Exception as e:
-        print("TELEGRAM ERROR:", repr(e))
+
+        print(
+            "TELEGRAM ERROR:",
+            repr(e)
+        )
+
         return False
 
 
 # =========================
-# PREDICTION ENGINE
+# PREDICTION
 # =========================
 
 def make_prediction(rows):
 
-    if len(rows) < 15:
+    if len(rows) < 5:
         return None
 
-    results = []
+    sequence = []
+
+    for row in rows:
+
+        result = big_small(
+            row.get("number")
+        )
+
+        if result:
+            sequence.append(result)
+
+    if len(sequence) < 5:
+        return None
 
     # API newest -> oldest
-    for row in rows[:15]:
-        value = big_small(row.get("number"))
+    # Convert to oldest -> newest
+    sequence = list(reversed(sequence))
 
-        if value:
-            results.append(value)
+    print(
+        "ANALYSIS SEQUENCE:",
+        sequence
+    )
 
-    if len(results) < 15:
-        return None
+    # --------------------------------
+    # Pattern search
+    # --------------------------------
 
-    # oldest -> newest
-    sequence = list(reversed(results))
+    for length in range(
+        min(5, len(sequence) - 1),
+        1,
+        -1
+    ):
 
-    print("15 SEQUENCE:", sequence)
+        target = sequence[-length:]
 
-    # ---------------------------------
-    # 1. Pattern matching
-    # ---------------------------------
-
-    for pattern_length in range(7, 0, -1):
-
-        target = sequence[-pattern_length:]
         followers = []
 
-        for i in range(len(sequence) - pattern_length):
+        for i in range(
+            len(sequence) - length
+        ):
 
-            if sequence[i:i + pattern_length] == target:
+            if sequence[
+                i:i + length
+            ] == target:
 
-                next_index = i + pattern_length
+                next_index = i + length
 
                 if next_index < len(sequence):
-                    followers.append(sequence[next_index])
+
+                    followers.append(
+                        sequence[next_index]
+                    )
 
         if followers:
 
-            big_count = followers.count("BIG")
-            small_count = followers.count("SMALL")
+            big_count = followers.count(
+                "BIG"
+            )
+
+            small_count = followers.count(
+                "SMALL"
+            )
 
             print(
                 "PATTERN:",
@@ -133,49 +170,24 @@ def make_prediction(rows):
             if small_count > big_count:
                 return "SMALL"
 
-    # ---------------------------------
-    # 2. Recent 5-result fallback
-    # ---------------------------------
+    # --------------------------------
+    # Recent frequency fallback
+    # --------------------------------
 
-    recent5 = sequence[-5:]
+    recent = sequence[-5:]
 
-    big5 = recent5.count("BIG")
-    small5 = recent5.count("SMALL")
-
-    print(
-        "RECENT 5:",
-        recent5,
-        "BIG:",
-        big5,
-        "SMALL:",
-        small5
+    big_count = recent.count(
+        "BIG"
     )
 
-    if big5 > small5:
-        return "SMALL"
-
-    if small5 > big5:
-        return "BIG"
-
-    # ---------------------------------
-    # 3. Last 15 frequency fallback
-    # ---------------------------------
-
-    big15 = sequence.count("BIG")
-    small15 = sequence.count("SMALL")
-
-    print(
-        "15 COUNT:",
-        "BIG:",
-        big15,
-        "SMALL:",
-        small15
+    small_count = recent.count(
+        "SMALL"
     )
 
-    if big15 > small15:
+    if big_count > small_count:
         return "SMALL"
 
-    if small15 > big15:
+    if small_count > big_count:
         return "BIG"
 
     return None
@@ -199,44 +211,53 @@ def process_prediction(rows):
 
     latest = rows[0]
 
-    issue = latest.get("issueNumber")
-    number = latest.get("number")
+    issue = latest.get(
+        "issueNumber"
+    )
+
+    number = latest.get(
+        "number"
+    )
 
     if not issue or number is None:
         return
 
+    # Same result already processed
     if issue == last_processed_issue:
         return
 
     last_processed_issue = issue
 
-    actual = big_small(number)
+    actual = big_small(
+        number
+    )
 
     print(
-        "RESULT:",
+        "NEW RESULT:",
         issue,
         number,
         actual
     )
 
-    # ---------------------------------
-    # Check previous prediction
-    # ---------------------------------
+    # =========================
+    # CHECK PREVIOUS PREDICTION
+    # =========================
 
     if current_prediction:
 
         if current_prediction == actual:
 
             wins += 1
+
             level = 1
 
             telegram_send(
-                "✅ SIMULATION WIN\n\n"
+                "✅ RESULT\n\n"
                 f"Period: {current_prediction_issue}\n"
                 f"Prediction: {current_prediction}\n"
                 f"Result: {actual}\n\n"
                 f"WIN: {wins} | LOSS: {losses}\n"
-                f"Analysis Level: {level}"
+                f"Level: {level}"
             )
 
         else:
@@ -247,36 +268,44 @@ def process_prediction(rows):
                 level += 1
 
             telegram_send(
-                "❌ SIMULATION LOSS\n\n"
+                "❌ RESULT\n\n"
                 f"Period: {current_prediction_issue}\n"
                 f"Prediction: {current_prediction}\n"
                 f"Result: {actual}\n\n"
                 f"WIN: {wins} | LOSS: {losses}\n"
-                f"Analysis Level: {level}"
+                f"Next Level: {level}"
             )
 
-    # ---------------------------------
-    # New prediction
-    # ---------------------------------
+    # =========================
+    # NEW PREDICTION
+    # =========================
 
-    prediction = make_prediction(rows)
+    prediction = make_prediction(
+        rows
+    )
 
     try:
-        next_issue = str(int(issue) + 1)
+
+        next_issue = str(
+            int(issue) + 1
+        )
+
     except Exception:
+
         next_issue = "NEXT"
 
     if prediction:
 
         current_prediction = prediction
+
         current_prediction_issue = next_issue
 
         telegram_send(
-            "🎯 VEERGAME ANALYSIS\n\n"
+            "🎯 VEERGAME PREDICTION\n\n"
             f"Next Period: {next_issue}\n"
-            f"Signal: {prediction}\n"
-            f"Analysis Level: {level}\n\n"
-            f"WIN: {wins} | LOSS: {losses}\n"
+            f"Prediction: {prediction}\n\n"
+            f"Level: {level}\n"
+            f"WIN: {wins} | LOSS: {losses}\n\n"
             "Mode: Statistical Simulation"
         )
 
@@ -289,26 +318,30 @@ def process_prediction(rows):
     else:
 
         current_prediction = None
+
         current_prediction_issue = None
 
-        telegram_send(
-            "⏳ VEERGAME ANALYSIS\n\n"
-            "Signal: WAIT\n"
-            "No clear statistical signal."
+        print(
+            "NO CLEAR PREDICTION"
         )
 
 
 # =========================
-# BROWSER BRIDGE
+# BRIDGE
 # =========================
 
-@app.route("/push-history", methods=["POST"])
+@app.route(
+    "/push-history",
+    methods=["POST"]
+)
 def push_history():
 
     global history
     global last_history_update
 
-    key = request.form.get("key")
+    key = request.form.get(
+        "key"
+    )
 
     if key != BRIDGE_KEY:
 
@@ -317,7 +350,9 @@ def push_history():
             "error": "Invalid bridge key"
         }), 401
 
-    payload = request.form.get("payload")
+    payload = request.form.get(
+        "payload"
+    )
 
     if not payload:
 
@@ -327,7 +362,10 @@ def push_history():
         }), 400
 
     try:
-        data = json.loads(payload)
+
+        data = json.loads(
+            payload
+        )
 
     except Exception as e:
 
@@ -337,9 +375,15 @@ def push_history():
             "detail": str(e)
         }), 400
 
-    rows = data.get("list", [])
+    rows = data.get(
+        "list",
+        []
+    )
 
-    if not isinstance(rows, list):
+    if not isinstance(
+        rows,
+        list
+    ):
 
         return jsonify({
             "ok": False,
@@ -359,7 +403,10 @@ def push_history():
     )
 
     try:
-        process_prediction(history)
+
+        process_prediction(
+            history
+        )
 
     except Exception as e:
 
@@ -371,22 +418,11 @@ def push_history():
     return jsonify({
         "ok": True,
         "history_count": len(history),
-        "latest": history[0] if history else None
-    })
-
-
-# =========================
-# HISTORY
-# =========================
-
-@app.route("/history")
-def get_history():
-
-    return jsonify({
-        "ok": True,
-        "history_count": len(history),
-        "last_update": last_history_update,
-        "list": history
+        "latest": (
+            history[0]
+            if history
+            else None
+        )
     })
 
 
@@ -410,20 +446,37 @@ def test():
 
 
 # =========================
-# TELEGRAM LISTENER
+# HISTORY
+# =========================
+
+@app.route("/history")
+def get_history():
+
+    return jsonify({
+        "ok": True,
+        "history_count": len(history),
+        "last_update": last_history_update,
+        "list": history
+    })
+
+
+# =========================
+# TELEGRAM COMMANDS
 # =========================
 
 def telegram_listener():
 
     global telegram_offset
 
-    print("TELEGRAM LISTENER STARTED")
+    print(
+        "TELEGRAM LISTENER STARTED"
+    )
 
     while True:
 
         try:
 
-            r = requests.get(
+            response = requests.get(
                 f"{TELEGRAM_API}/getUpdates",
                 params={
                     "offset": telegram_offset,
@@ -432,29 +485,49 @@ def telegram_listener():
                 timeout=20
             )
 
-            data = r.json()
+            data = response.json()
 
-            if not data.get("ok"):
+            if not data.get(
+                "ok"
+            ):
 
                 time.sleep(2)
                 continue
 
-            for update in data.get("result", []):
+            for update in data.get(
+                "result",
+                []
+            ):
 
-                telegram_offset = update["update_id"] + 1
+                telegram_offset = (
+                    update["update_id"] + 1
+                )
 
-                message = update.get("message")
+                message = update.get(
+                    "message"
+                )
 
                 if not message:
                     continue
 
-                text = message.get("text", "")
-                chat_id = message.get("chat", {}).get("id")
+                text = message.get(
+                    "text",
+                    ""
+                )
+
+                chat_id = message.get(
+                    "chat",
+                    {}
+                ).get(
+                    "id"
+                )
 
                 if not text or not chat_id:
                     continue
 
-                if text.startswith("/start"):
+                if text.startswith(
+                    "/start"
+                ):
 
                     requests.post(
                         f"{TELEGRAM_API}/sendMessage",
@@ -469,7 +542,9 @@ def telegram_listener():
                         timeout=15
                     )
 
-                elif text.startswith("/status"):
+                elif text.startswith(
+                    "/status"
+                ):
 
                     requests.post(
                         f"{TELEGRAM_API}/sendMessage",
@@ -487,15 +562,25 @@ def telegram_listener():
                         timeout=15
                     )
 
-                elif text.startswith("/history"):
+                elif text.startswith(
+                    "/history"
+                ):
 
                     lines = []
 
-                    for row in history[:15]:
+                    for row in history:
 
-                        issue = row.get("issueNumber")
-                        number = row.get("number")
-                        result = big_small(number)
+                        issue = row.get(
+                            "issueNumber"
+                        )
+
+                        number = row.get(
+                            "number"
+                        )
+
+                        result = big_small(
+                            number
+                        )
 
                         lines.append(
                             f"{issue} → {number} → {result}"
@@ -506,13 +591,15 @@ def telegram_listener():
                         json={
                             "chat_id": chat_id,
                             "text":
-                                "📜 LAST 15 RESULTS\n\n"
+                                "📜 HISTORY\n\n"
                                 + "\n".join(lines)
                         },
                         timeout=15
                     )
 
-                elif text.startswith("/reset"):
+                elif text.startswith(
+                    "/reset"
+                ):
 
                     reset_state()
 
@@ -520,7 +607,8 @@ def telegram_listener():
                         f"{TELEGRAM_API}/sendMessage",
                         json={
                             "chat_id": chat_id,
-                            "text": "♻️ Simulation reset."
+                            "text":
+                                "♻️ Simulation reset."
                         },
                         timeout=15
                     )
@@ -528,7 +616,7 @@ def telegram_listener():
         except Exception as e:
 
             print(
-                "TELEGRAM LISTENER ERROR:",
+                "TELEGRAM ERROR:",
                 repr(e)
             )
 
@@ -554,18 +642,27 @@ def reset_state():
 
     current_prediction = None
     current_prediction_issue = None
+
     last_processed_issue = None
 
 
 # =========================
-# MAIN
+# START
 # =========================
 
 if __name__ == "__main__":
 
-    print("================================")
-    print("VEERGAME PREDICTOR STARTING")
-    print("================================")
+    print(
+        "=============================="
+    )
+
+    print(
+        "VEERGAME PREDICTOR STARTING"
+    )
+
+    print(
+        "=============================="
+    )
 
     print(
         "TOKEN PRESENT:",
@@ -592,4 +689,4 @@ if __name__ == "__main__":
     app.run(
         host="0.0.0.0",
         port=port
-        )
+    )
